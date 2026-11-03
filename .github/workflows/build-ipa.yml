@@ -127,8 +127,6 @@ jobs:
           echo "ALL DOWNLOADS COMPLETE"
 
       - name: Build the app and the IPA
-        env:
-          DM_ALLOW_OTHER_METAL: '1'
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/out"
