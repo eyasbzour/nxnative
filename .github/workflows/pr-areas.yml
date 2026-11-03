@@ -33,16 +33,15 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          # gh retry helper: 5 attempts, 10 s apart, retried on 5xx/gateway blips
+          # gh helper with a hard cap: at most 2 extra attempts (3 total), 10 s apart
           gh_ok() {
-            local attempt=1
-            until "$@"; do
-              if [ "$attempt" -ge 5 ]; then echo "gh failed after 5 attempts: $*" >&2; return 1; fi
-              echo "gh attempt $attempt failed, retrying in 10 s..." >&2
-              sleep 10
-              attempt=$((attempt + 1))
-            done
-            return 0
+            if "$@"; then return 0; fi
+            echo "gh failed once, retrying in 10 s: $*" >&2
+            sleep 10
+            if "$@"; then return 0; fi
+            echo "gh failed twice, last try in 10 s: $*" >&2
+            sleep 10
+            "$@"
           }
           prs=${PR:-$(gh_ok gh pr list --state open --limit 1000 --json number --jq '.[].number')}
           declare -A made   # labels that exist (a pull request's run) or were reset in this run (by hand)
