@@ -82,8 +82,6 @@ jobs:
           brew install --cask dotnet-sdk
 
       - name: Toolchain check (Xcode, iOS SDK, Metal compiler)
-        env:
-          DM_ALLOW_OTHER_METAL: "1"
         run: |
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version

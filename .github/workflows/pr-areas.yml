@@ -33,16 +33,26 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          prs=${PR:-$(gh pr list --state open --limit 1000 --json number --jq '.[].number')}
+          # gh helper with a hard cap: at most 2 extra attempts (3 total), 10 s apart
+          gh_ok() {
+            if "$@"; then return 0; fi
+            echo "gh failed once, retrying in 10 s: $*" >&2
+            sleep 10
+            if "$@"; then return 0; fi
+            echo "gh failed twice, last try in 10 s: $*" >&2
+            sleep 10
+            "$@"
+          }
+          prs=${PR:-$(gh_ok gh pr list --state open --limit 1000 --json number --jq '.[].number')}
           declare -A made   # labels that exist (a pull request's run) or were reset in this run (by hand)
-          if [ -n "$PR" ]; then while IFS= read -r name; do made[$name]=1; done < <(gh label list --limit 1000 --json name --jq '.[].name'); fi
+          if [ -n "$PR" ]; then while IFS= read -r name; do made[$name]=1; done < <(gh_ok gh label list --limit 1000 --json name --jq '.[].name'); fi
           for n in $prs; do
-            gh api --paginate "repos/$GH_REPO/pulls/$n/files" --jq '.[].filename' | python3 dm/tools/pr_areas.py > labels.tsv   # every file (gh pr view stops at 100)
+            gh_ok gh api --paginate "repos/$GH_REPO/pulls/$n/files" --jq '.[].filename' | python3 dm/tools/pr_areas.py > labels.tsv   # every file (gh pr view stops at 100)
             add=()
             while IFS=$'\t' read -r name color desc; do
-              if [ -z "${made[$name]:-}" ]; then gh label create "$name" --color "$color" --description "$desc" --force > /dev/null; made[$name]=1; fi
+              if [ -z "${made[$name]:-}" ]; then gh_ok gh label create "$name" --color "$color" --description "$desc" --force > /dev/null; made[$name]=1; fi
               add+=(--add-label "$name")
             done < labels.tsv
-            if [ ${#add[@]} -gt 0 ]; then gh pr edit "$n" "${add[@]}" > /dev/null; fi
+            if [ ${#add[@]} -gt 0 ]; then gh_ok gh pr edit "$n" "${add[@]}" > /dev/null; fi
             echo "#$n: $(cut -f1 labels.tsv | paste -sd, -)"
           done
