@@ -19,7 +19,7 @@ on:
       app_name:
         description: "App name on the iPhone home screen"
         required: false
-        default: "Tears of the Kingdom"
+        default: ""
       package:
         description: "Version to pack, e.g. v720896 (empty = the newest in the folder)"
         required: false
