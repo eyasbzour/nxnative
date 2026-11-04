@@ -19,7 +19,7 @@ on:
       app_name:
         description: "App name on the iPhone home screen"
         required: false
-        default: "Tears of the Kingdom"
+        default: ""
       package:
         description: "Version to pack, e.g. v720896 (empty = the newest in the folder)"
         required: false
@@ -37,6 +37,10 @@ env:
   # The toolchain the project supports (README: Xcode 27.1; dm/gfx/tools/dmsh_chain.lock: its Metal compiler),
   # named by path so the image's default moving to another Xcode does not move this job.
   DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  # the runner's Metal compiler is 27.1's (the lockfile was made with 27.2's): every step, the
+  # toolchain check and the build, builds with it anyway (the merge of main into this branch
+  # keeps dropping a step-level override, so it lives at the top level)
+  DM_ALLOW_OTHER_METAL: "1"
 
 permissions:
   contents: write   # the job publishes the release with the IPA parts
