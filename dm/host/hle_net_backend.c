@@ -501,7 +501,7 @@ int dm_net_poll(void *fds, uint64_t count, int timeout_ms) {
     for (uint64_t i = 0; i < count; i++) {
         refs[i].fd = host[i].fd = -1; guest[i].revents = 0;
         if (guest[i].fd < 0) continue;
-        if ((uint16_t)guest[i].events & ~0x1ffu) { net_error(22); goto done; }
+        if ((uint16_t)guest[i].events & (uint16_t)~0x1ffu) { net_error(22); goto done; }
         if (net_borrow(guest[i].fd, &refs[i])) { if (t_net_errno != 9) goto done; guest[i].revents = 32; invalid = 1; }
         else { host[i].fd = refs[i].fd; host[i].events = net_poll_events((uint16_t)guest[i].events); }
     }

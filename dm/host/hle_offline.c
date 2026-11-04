@@ -33,7 +33,10 @@ HLE_FORCE("_ZN2nn9bluetooth24GetBleConnectionInfoListEPNS0_17BleConnectionInfoEi
 HLE_FORCE("_ZN2nn9bluetooth19ConnectToGattServerERKNS0_7AddressE", "BLE connect (cut)", Result, h_bt_Connect, const void *a) { (void)a; return RES_FAIL; }
 
 // ---------- socket: offline by default. An explicit network mode uses the translated host transport ----------
-enum { SK_ENETDOWN = 100, SK_EAI_FAIL = 4 };
+#ifndef SK_ENETDOWN
+#define SK_ENETDOWN 100
+#endif
+enum { SK_EAI_FAIL = 4 };
 HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "connects to the bsd socket service; offline, creates no session (cut)", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
 HLE_FORCE_WAIT("_ZN2nn6socket8FinalizeEv", "release the host's LAN descriptors, if enabled", Result, h_sk_Fini, void) { dm_net_finalize(); return RES_OK; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "Horizon Linux errno in LAN mode; ENETDOWN otherwise", int, h_sk_Errno, void) { return dm_net_enabled() ? dm_net_errno() : SK_ENETDOWN; }

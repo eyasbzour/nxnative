@@ -92,7 +92,7 @@ DM_MOTION_HID	switch	On the Mac, `0` disables the passive Switch Pro Controller 
 DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second per source (phone / GameController / controller HID; acceleration in G, gyro in revolutions/s), for checking the axes: flat and still reads acc 0 0 -1
 DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
 DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
-DM_NETWORK	player	auto routes LAN, LDN and configured online calls by service; offline, lan, ldn and nextendo are explicit overrides
+DM_NETWORK	player	auto routes LAN, LDN and configured online calls by service; offline, lan, ldn are explicit overrides
 DM_NETWORK_INTERFACE	player	IPv4 interface name for local sockets; otherwise use the actual default route
 DM_NET_DISCOVERY_PEER	player	Optional discovery relay IPv4 endpoint; automatic local discovery requires no entered address
 DM_NET_TRACE	diagnostic	Log native socket and local-network translation details

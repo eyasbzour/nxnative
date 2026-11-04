@@ -43,7 +43,7 @@ static int sk_fail(void) { dm_net_set_errno(dm_net_enabled() ? 95 : SK_ENETDOWN)
 // on Poll(fds, 0, 33 ms), 11,000 calls a second. An endless wait on nothing never returns;
 // HLE_FORCE_WAIT publishes the guest context so a collector can pause the thread while it waits.
 void dm_guest_sleep_ns(int64_t ns);
-static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT64_MAX / 1000000) { dm_net_set_errno(22); return -1; } dm_guest_sleep_ns(ms * 1000000); return 0; }
+static int sk_idle(int64_t ms) { if (ms < 0) return 0; if (ms > INT64_MAX / 1000000) { dm_net_set_errno(22); return -1; } dm_guest_sleep_ns(ms * 1000000); return 0; }
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain pollfd form
     if (dm_net_enabled()) return dm_net_poll(fds, n, ms);

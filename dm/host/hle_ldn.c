@@ -324,7 +324,7 @@ uint32_t dm_ldn_connect(dm_ldn_context *c, const dm_ldn_network *network, const 
     // Node count can change between Scan and Connect. Admission uses the
     // listener's current roster, rather than rejecting a stale full snapshot.
     pthread_mutex_lock(&c->lock); if (c->state != LDN_STATION || c->peers[0].fd >= 0) { pthread_mutex_unlock(&c->lock); return LDN_INVALID_STATE; }
-    struct sockaddr_in dest = ldn_endpoint(htonl(network->nodes[0].ip), 11452);
+    struct sockaddr_in dest = ldn_endpoint(htonl(network->nodes[0].ip), c->transport.port);
     for (int i = 0; i < c->room_count; ++i) if (!memcmp(&network->id, &c->rooms[i].network.id, sizeof network->id)) dest = c->rooms[i].endpoint;
     int fd = socket(AF_INET, SOCK_STREAM, 0); if (fd < 0) { pthread_mutex_unlock(&c->lock); return LDN_CONNECT_FAILED; }
     ldn_nonblock(fd); struct sockaddr_in local = ldn_endpoint(c->transport.address, 0);
