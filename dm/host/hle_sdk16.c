@@ -1,6 +1,7 @@
 // System service interfaces used by games on newer SDKs (16.x): oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
+#include "hle_net_diag.h"
 #include <fcntl.h>
 #include <pthread.h>
 #include <pthread/qos.h>
@@ -328,6 +329,7 @@ HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "game log → h
 }
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
 static void diag_abort(uint32_t res, void *lr) {
+    dmnd_dump();
     module_t *m = module_of(lr);
     LOG("game called nn::diag abort: Result %#x, call site %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
     dm_backtrace((uint64_t)__builtin_frame_address(1));

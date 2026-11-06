@@ -9,7 +9,9 @@
 // then the data words, whose CMIF part starts 16-byte aligned to the buffer: in a domain session the domain header {u8 type, u8 objects, u16 size, u32 object, u32, u32 token} first,
 // then {"SFCI", version, command, token} and the arguments. The response is the same with {u32 objects, 3 × u32} and {"SFCO", version, result, token}
 #include "hle.h"
+#include "hle_net_diag.h"
 #include <pthread.h>
+#include <string.h>
 
 #define SF_H0 0xd0000u   // session handles: outside the kernel handle table (0x1000 + slot, 4096 slots, hle_thread.c)
 #define SF_MAX 64
@@ -64,8 +66,10 @@ HLE_FORCE("_ZN2nn2sf4hipc31InitializeHipcServiceResolutionEv", "service name res
 HLE_FORCE("_ZN2nn2sf4hipc29FinalizeHipcServiceResolutionEv", "service name resolution (sm)", void, h_sf_FinRes, void) {}
 HLE_FORCE("_ZN2nn2sf4hipc20ConnectToHipcServiceEPNS_3svc6HandleEPKc", "connect to a service through sm → a host session for the services the host serves", Result, h_sf_Connect,
           uint32_t *out, const char *name) {
+    uint64_t n8 = 0; if (name) memcpy(&n8, name, strnlen(name, 8));
     for (size_t k = 0; k < sizeof sf_served / sizeof *sf_served; k++)
         if (!strncmp(name, sf_served[k], 8)) { *out = sf_new(sf_served[k], 0, NULL); LOG("sf: %s → host session %#x (every request succeeds with zeroed output)", sf_served[k], *out); return RES_OK; }
+    dmnd_record(DMND_SF, DMND_OP_SF_CONNECT, 0, 0, (int32_t)0xe15u, 0, 0, __builtin_return_address(0), n8);
     LOG("[RED] sf: the game connects to service %.8s itself, which the host does not serve", name);
     return 0xe15u;   // sm ResultNotRegistered
 }
