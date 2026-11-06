@@ -2,6 +2,7 @@
 #include "hle.h"
 #include "hle_net_diag.h"
 #include "net_socket.h"
+#include <pthread.h>
 #include <stdatomic.h>
 void dm_guest_sleep_ns(int64_t ns);
 
@@ -55,8 +56,66 @@ static inline int32_t dmnd_sock(int32_t r, uint16_t op, int32_t a0, int32_t a1) 
 // on Poll(fds, 0, 33 ms), 11,000 calls a second. An endless wait on nothing never returns;
 // HLE_FORCE_WAIT publishes the guest context so a collector can pause the thread while it waits.
 void dm_guest_sleep_ns(int64_t ns);
+void dm_guest_cond_wait_ns(pthread_cond_t *c, pthread_mutex_t *m, int64_t ns);   // hle_thread.c
 static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT64_MAX / 1000000) { dm_net_set_errno(22); return -1; } dm_guest_sleep_ns(ms * 1000000); return 0; }
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
+// EventFd is a local descriptor of the bsd service and works with no network, so it is real here: gRPC (nn::npln, Ocarina of Time at startup) wakes its pollers with one, and with no
+// wakeup descriptor its poll engine's factory (main+0x21f1280) returns null and grpc_init calls abort (main+0x21f0c7c). The descriptors are the host's only ones: Socket still fails.
+// The flags are Horizon's: gRPC creates its descriptor with 6 and consumes after a poll says it is ready. A descriptor with bit 0 reads one at a time; bits 1 and 2 never block
+enum { EFD_BASE = 0x4000, EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_EBADF = 9, SK_EAGAIN = 35 };
+static struct { uint64_t count; int used, flags; } g_efd[EFD_MAX];
+static pthread_mutex_t g_efd_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_efd_c = PTHREAD_COND_INITIALIZER;
+static int efd_used(int fd) { return fd >= EFD_BASE && fd < EFD_BASE + EFD_MAX && g_efd[fd - EFD_BASE].used; }   // with g_efd_m held
+static int efd_create(uint64_t v, int flags) {
+    pthread_mutex_lock(&g_efd_m);
+    for (int i = 0; i < EFD_MAX; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].count = v; g_efd[i].flags = flags; pthread_mutex_unlock(&g_efd_m); return EFD_BASE + i; }
+    pthread_mutex_unlock(&g_efd_m);
+    LOG("[RED] net: more than %d event descriptors", EFD_MAX);
+    t_skerr = 24; return -1;   // EMFILE
+}
+static int efd_close(int fd) {
+    pthread_mutex_lock(&g_efd_m);
+    int ok = efd_used(fd);
+    if (ok) { g_efd[fd - EFD_BASE].used = 0; pthread_cond_broadcast(&g_efd_c); }
+    pthread_mutex_unlock(&g_efd_m);
+    if (!ok) return sk_fail();
+    return 0;
+}
+static int efd_read(int fd, uint64_t *out) {
+    pthread_mutex_lock(&g_efd_m);
+    int r = -1;
+    for (;;) {
+        if (!efd_used(fd)) { t_skerr = SK_EBADF; break; }
+        uint64_t *c = &g_efd[fd - EFD_BASE].count; int f = g_efd[fd - EFD_BASE].flags;
+        if (*c) { if (f & 1) { *out = 1; *c -= 1; } else { *out = *c; *c = 0; } r = 0; break; }
+        if (f & 6) { t_skerr = SK_EAGAIN; break; }
+        dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() ? 1000000 : 100000000);
+    }
+    pthread_mutex_unlock(&g_efd_m);
+    return r;
+}
+static int efd_write(int fd, uint64_t v) {
+    pthread_mutex_lock(&g_efd_m);
+    int ok = efd_used(fd);
+    if (ok) { g_efd[fd - EFD_BASE].count += v; pthread_cond_broadcast(&g_efd_c); }
+    pthread_mutex_unlock(&g_efd_m);
+    if (!ok) { t_skerr = SK_EBADF; return -1; }
+    return 0;
+}
+static int efd_ready(sk_pollfd *p, uint64_t n) {   // with g_efd_m held: fills revents, returns how many descriptors have any
+    int ready = 0;
+    for (uint64_t i = 0; i < n; i++) {
+        p[i].revents = 0;
+        if (p[i].fd < 0) continue;
+        if (p[i].fd < EFD_BASE || p[i].fd >= EFD_BASE + EFD_MAX) continue;   // one the host never made: nothing to say (see dm_sk_poll)
+        if (!efd_used(p[i].fd)) { p[i].revents = 0x20; ready++; continue; }   // POLLNVAL: closed while waiting
+        if (g_efd[p[i].fd - EFD_BASE].count) p[i].revents |= p[i].events & (SK_POLLIN | SK_POLLRDNORM);
+        p[i].revents |= p[i].events & (SK_POLLOUT | SK_POLLWRNORM);
+        if (p[i].revents) ready++;
+    }
+    return ready;
+}
 // A descriptor the host never made (it creates no socket): Star Fox's HTTP thread polls two with a zero timeout, its wake-up eventfd that failed (-1) and a garbage one, and takes any failure
 // but EINTR as fatal (main+0xbe2efc4). On a console a socket with nothing to say reports no event at the timeout, so that is the answer for every descriptor: nothing ready, the timeout
 // waited out, 0. Failing with ENETDOWN here made the loop abort
@@ -70,17 +129,33 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     }
     if (n > 1024 || (!fds && n)) { dm_net_set_errno(!fds && n ? 14 : 22); dmnd_record(DMND_SOCKET,DMND_OP_POLL,(int32_t)n,ms,-1,dm_net_errno(),0,__builtin_return_address(0),0); return -1; }
     sk_pollfd *p = fds;
-    int hasfd = 0;
+    int any = 0;
+    pthread_mutex_lock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) {
-        hasfd = 1;
+        if (efd_used(p[i].fd)) { any = 1; continue; }
         static int once; if (!once++) LOG("socket: Poll of %llu descriptors with one the host never made (fd %d, events %#x; %d ms): nothing ready at the timeout", (unsigned long long)n, p[i].fd, p[i].events, ms);
-        break;
     }
+    pthread_mutex_unlock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
-    int rv = sk_idle(ms);
-    if (hasfd) { uint32_t pn = atomic_fetch_add_explicit(&g_dmnd.first_poll_efd, 1, memory_order_relaxed); if (pn < DMND_FIRST_POLL_EFD) LOG("net-diag first-poll-unserved #%u n=%llu ms=%d res=%d", pn, (unsigned long long)n, ms, rv); }
-    dmnd_record(DMND_SOCKET, DMND_OP_POLL, (int32_t)n, ms, rv, 0, 0, __builtin_return_address(0), 0);
-    return rv;
+    if (!any) {
+        int rv = sk_idle(ms);
+        if (dm_net_enabled()) { uint32_t pn = atomic_fetch_add_explicit(&g_dmnd.first_poll_efd, 1, memory_order_relaxed); if (pn < DMND_FIRST_POLL_EFD) LOG("net-diag first-poll-unserved #%u n=%llu ms=%d res=%d", pn, (unsigned long long)n, ms, rv); }
+        dmnd_record(DMND_SOCKET, DMND_OP_POLL, (int32_t)n, ms, rv, 0, 0, __builtin_return_address(0), 0);
+        return rv;
+    }
+    // As sk_idle: an endless wait comes back with 0 after 100 ms, so the hook returns to a garbage collector's pause and the caller can see a shutdown
+    int64_t limit = (ms < 0 ? 100 : (int64_t)ms) * 1000000;
+    uint64_t start = guest_ns();
+    pthread_mutex_lock(&g_efd_m);
+    int ready;
+    while (!(ready = efd_ready(p, n))) {
+        int64_t left = limit - (int64_t)(guest_ns() - start);
+        if (left <= 0) break;
+        dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() && left > 1000000 ? 1000000 : left);
+    }
+    pthread_mutex_unlock(&g_efd_m);
+    dmnd_record(DMND_SOCKET, DMND_OP_POLL, (int32_t)n, ms, ready, 0, 0, __builtin_return_address(0), 0);
+    return ready;
 }
 int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
     if (dm_net_enabled()) { int rv = dm_net_select(nfds, (void *)r, (void *)w, (void *)e, tv); dmnd_record(DMND_SOCKET,DMND_OP_SELECT,nfds,0,rv,rv<0?dm_net_errno():0,0,__builtin_return_address(0),0); return rv; }
@@ -96,7 +171,7 @@ SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, un
 SKW("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", h_sk_Connect, int s, const void *a, unsigned n) { return dmnd_sock(dm_net_connect(s, a, n),DMND_OP_CONNECT,0,0); }
 SKF("_ZN2nn6socket6ListenEii", h_sk_Listen, int s, int n) { return dmnd_sock(dm_net_listen(s, n),DMND_OP_LISTEN,0,0); }
 SKW("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", h_sk_Accept, int s, void *a, unsigned *n) { return dmnd_sock(dm_net_accept(s, a, n),DMND_OP_ACCEPT,0,0); }
-SKW("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { return dmnd_sock(dm_net_close(s),DMND_OP_CLOSE,0,0); }
+SKW("_ZN2nn6socket5CloseEi", h_sk_Close, int s) { if (efd_used(s)) return efd_close(s); return dmnd_sock(dm_net_close(s),DMND_OP_CLOSE,0,0); }
 SKF("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", h_sk_GetPeerName, int s, void *a, unsigned *n) { return dmnd_sock(dm_net_name(s, a, n, 1),DMND_OP_NAME,0,0); }
 SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, void *a, unsigned *n) { return dmnd_sock(dm_net_name(s, a, n, 0),DMND_OP_NAME,0,0); }
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dmnd_sock(dm_net_sockopt(s, l, o, v, n, 0),DMND_OP_SOCKOPT,0,0); }
@@ -114,9 +189,10 @@ HLE_FORCE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", "socket library a
 // The C library's poll (SDK 21's nnmusl, Star Fox): it needs the socket state of the initialization cut above and fails with EFAULT without it, which the game's loop takes as fatal, so it goes
 // to the host's Poll too
 SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
-HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE","socket transport: unavailable by default, translated Darwin sockets in explicit Mac LAN mode",int,h_sk_EventFd,unsigned long v,int f){ int rv=sk_fail(); dmnd_efd_call(DMND_OP_EVENTFD,(int32_t)v,f,rv,dm_net_errno()); return rv; }
-HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm","socket transport: unavailable by default, translated Darwin sockets in explicit Mac LAN mode",int,h_sk_EventFdRead,int s,unsigned long *v){ (void)v; int rv=sk_fail(); dmnd_efd_call(DMND_OP_EVENTFD_RW,s,0,rv,dm_net_errno()); return rv; }
-HLE_FORCE("_ZN2nn6socket12EventFdWriteEim","socket transport: unavailable by default, translated Darwin sockets in explicit Mac LAN mode",int,h_sk_EventFdWrite,int s,unsigned long v){ (void)v; int rv=sk_fail(); dmnd_efd_call(DMND_OP_EVENTFD_RW,s,1,rv,dm_net_errno()); return rv; }
+// EventFd works offline (a host counter descriptor; a garbage collector of the game's own wakes its pollers, Ocarina of Time at startup): explicit LAN mode has no eventfd ABI, so it fails there
+HLE_FORCE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", "offline: a host counter descriptor; explicit LAN mode has no eventfd transport", int, h_sk_EventFd, unsigned long v, int f) { int rv = dm_net_enabled() ? sk_fail() : efd_create(v, f); dmnd_efd_call(DMND_OP_EVENTFD,(int32_t)v,f,rv,dm_net_errno()); return rv; }
+HLE_FORCE("_ZN2nn6socket11EventFdReadEiPm", "reads the host counter; a transport-side descriptor fails as sockets do", int, h_sk_EventFdRead, int s, unsigned long *v) { uint64_t c = 0; int rv = efd_read(s, &c); if (!rv && v) *v = c; if (rv < 0 && dm_net_enabled()) { rv = sk_fail(); } dmnd_efd_call(DMND_OP_EVENTFD_RW,s,0,rv,dm_net_errno()); return rv; }
+HLE_FORCE("_ZN2nn6socket12EventFdWriteEim", "adds to the host counter and wakes its pollers; a transport-side descriptor fails as sockets do", int, h_sk_EventFdWrite, int s, unsigned long v) { int rv = efd_write(s, v); if (rv < 0 && dm_net_enabled()) { rv = sk_fail(); } dmnd_efd_call(DMND_OP_EVENTFD_RW,s,1,rv,dm_net_errno()); return rv; }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; (void)k; return sk_fail(); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { (void)o; return sk_fail(); }
 HLE_FORCE_WAIT("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_recv(s, b, n, f, NULL, NULL); }
@@ -132,7 +208,7 @@ HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "socket error code kept by the host",
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { return dmnd_sock(dm_net_socket(a, b, c),DMND_OP_SOCKET,0,0); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { return dmnd_sock(dm_net_bind(s, a, n),DMND_OP_BIND,0,0); }
 SKW("nnsocketConnect", h_nsk_Connect, int s, const void *a, unsigned n) { return dmnd_sock(dm_net_connect(s, a, n),DMND_OP_CONNECT,0,0); }
-SKW("nnsocketClose", h_nsk_Close, int s) { return dmnd_sock(dm_net_close(s),DMND_OP_CLOSE,0,0); }
+SKW("nnsocketClose", h_nsk_Close, int s) { if (efd_used(s)) return efd_close(s); return dmnd_sock(dm_net_close(s),DMND_OP_CLOSE,0,0); }
 SKF("nnsocketGetPeerName", h_nsk_GetPeerName, int s, void *a, unsigned *n) { return dmnd_sock(dm_net_name(s, a, n, 1),DMND_OP_NAME,0,0); }
 SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { return dmnd_sock(dm_net_name(s, a, n, 0),DMND_OP_NAME,0,0); }
 SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dmnd_sock(dm_net_sockopt(s, l, o, v, n, 0),DMND_OP_SOCKOPT,0,0); }
