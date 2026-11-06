@@ -373,8 +373,8 @@ NET_HEADERS = ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../d
 NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
 $(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
 	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c
-$(B)/t_net: t_net.c ../hle_net.c ../hle_offline.c ../hle.h ../entry.S ../hle_bigstack.c $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
-	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net.c ../hle_net.c ../hle_offline.c $(NET_SOURCES) ../entry.S ../hle_bigstack.c
+$(B)/t_net: t_net.c ../hle_net.c ../hle_offline.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../entry.S ../hle_bigstack.c $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net.c ../hle_net.c ../hle_offline.c ../hle_net_diag.c $(NET_SOURCES) ../entry.S ../hle_bigstack.c
 $(B)/t_net_discovery: t_net_discovery.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
 	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -o $@ t_net_discovery.c $(NET_SOURCES)
 $(B)/t_discovery_protocol: t_discovery_protocol.c ../discovery_protocol.h | $(B)
