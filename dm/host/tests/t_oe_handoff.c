@@ -11,6 +11,8 @@
 void dm_audio_suspend(int on) { (void)on; }
 void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
 void dm_gfx_suspend(int on) { (void)on; }
+void dm_host_shutdown_then(const char *why, void (*then)(void *), void *arg) { (void)why; (void)then; (void)arg; }
+void dm_host_shutdown(const char *why) { (void)why; }
 
 static thr_t *worker;
 static uint32_t event_read;

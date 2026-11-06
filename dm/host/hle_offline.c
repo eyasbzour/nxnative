@@ -58,7 +58,7 @@ HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "resolver error text", con
 HLE_FORCE_WAIT("_ZN2nn6socket7ConnectEiPK8sockaddrj", "socket transport, offline by default", int, h_sk_Connect2, int s, const void *a, unsigned n) { return dm_net_connect(s, a, n); }
 HLE_FORCE_WAIT("_ZN2nn6socket6AcceptEiP8sockaddrPj", "socket transport, offline by default", int, h_sk_Accept2, int s, void *a, unsigned *n) { return dm_net_accept(s, a, n); }
 HLE_FORCE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", "socket transport, offline by default", int, h_sk_GetSockName2, int s, void *a, unsigned *n) { return dm_net_name(s, a, n, 0); }
-HLE_FORCE("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", "SDK 4 socket transport, offline by default", int, h_sk_GetPeerName4, int s, void *a, unsigned *n) { return dm_net_name(s, a, n, 1); }
+/* GetPeerName registered in hle_net.c to avoid duplicate forced takeover entries */
 HLE_FORCE_WAIT("_ZN2nn6socket13GetHostByNameEPKc", "SDK 4 resolver, offline by default", void *, h_sk_GetHostByName4, const char *name) { return dm_net_gethostbyname(name); }
 HLE_FORCE("_ZN2nn6socket10GetSockOptEiiiPvPj", "socket transport, offline by default", int, h_sk_GetSockOpt2, int s, int l, int o, void *v, unsigned *n) { return dm_net_sockopt(s, l, o, v, n, 0); }
 HLE_FORCE("_ZN2nn6socket10SetSockOptEiiiPKvj", "socket transport, offline by default", int, h_sk_SetSockOpt2, int s, int l, int o, const void *v, unsigned n) { return dm_net_sockopt(s, l, o, (void *)v, &n, 1); }
