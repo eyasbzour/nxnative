@@ -72,7 +72,7 @@ static int efd_create(uint64_t v, int flags) {
     for (int i = 0; i < EFD_MAX; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].count = v; g_efd[i].flags = flags; pthread_mutex_unlock(&g_efd_m); return EFD_BASE + i; }
     pthread_mutex_unlock(&g_efd_m);
     LOG("[RED] net: more than %d event descriptors", EFD_MAX);
-    t_skerr = 24; return -1;   // EMFILE
+    dm_net_set_errno(24); return -1;   // EMFILE
 }
 static int efd_close(int fd) {
     pthread_mutex_lock(&g_efd_m);
@@ -86,10 +86,10 @@ static int efd_read(int fd, uint64_t *out) {
     pthread_mutex_lock(&g_efd_m);
     int r = -1;
     for (;;) {
-        if (!efd_used(fd)) { t_skerr = SK_EBADF; break; }
+        if (!efd_used(fd)) { dm_net_set_errno(SK_EBADF); break; }
         uint64_t *c = &g_efd[fd - EFD_BASE].count; int f = g_efd[fd - EFD_BASE].flags;
         if (*c) { if (f & 1) { *out = 1; *c -= 1; } else { *out = *c; *c = 0; } r = 0; break; }
-        if (f & 6) { t_skerr = SK_EAGAIN; break; }
+        if (f & 6) { dm_net_set_errno(SK_EAGAIN); break; }
         dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() ? 1000000 : 100000000);
     }
     pthread_mutex_unlock(&g_efd_m);
@@ -100,7 +100,7 @@ static int efd_write(int fd, uint64_t v) {
     int ok = efd_used(fd);
     if (ok) { g_efd[fd - EFD_BASE].count += v; pthread_cond_broadcast(&g_efd_c); }
     pthread_mutex_unlock(&g_efd_m);
-    if (!ok) { t_skerr = SK_EBADF; return -1; }
+    if (!ok) { dm_net_set_errno(SK_EBADF); return -1; }
     return 0;
 }
 static int efd_ready(sk_pollfd *p, uint64_t n) {   // with g_efd_m held: fills revents, returns how many descriptors have any
