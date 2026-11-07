@@ -366,7 +366,7 @@ def run(cmd, log, env=None, cwd=None, on_line=None, ok=(), fatal=True):
     fatal False: such an exit only prints those lines and returns its code (the caller ends the stage and goes on without what the command makes)"""
     cmd = [str(c) for c in cmd]
     log.parent.mkdir(parents=True, exist_ok=True)
-    tail = collections.deque(maxlen=40)
+    tail = collections.deque(maxlen=400)
     p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1)
     try:
         with open(log, 'w') as f:
