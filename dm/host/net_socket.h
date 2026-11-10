@@ -2,20 +2,32 @@
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include "net_discovery.h"
 
 typedef struct { int32_t fd; int16_t events, revents; } dm_net_pollfd;
 typedef struct { int32_t flags, family, type, protocol; uint32_t addrlen, pad; void *addr; char *canonname; void *next; } dm_net_addrinfo;
 typedef struct { int32_t flags, family, type, protocol; uint32_t addrlen, pad; char *canonname; void *addr; void *next; } dm_net_addrinfo_legacy;
-typedef enum { DM_NET_OFFLINE, DM_NET_LAN, DM_NET_LDN, DM_NET_AUTO } dm_net_mode_t;
+typedef enum { DM_NET_OFFLINE, DM_NET_LAN, DM_NET_LDN, DM_NET_NEXTENDO, DM_NET_AUTO } dm_net_mode_t;
 dm_net_mode_t dm_net_mode(void);
 // Automatic enables independent service capabilities, not a mutable global
 // session type. The guest chooses sockets, LDN or online APIs from its menu.
+static inline int dm_net_nextendo_enabled(void) {
+    dm_net_mode_t mode = dm_net_mode();
+    const char *profile = getenv("DM_NEXTENDO_ROUTES");
+    // A missing profile leaves automatic local play unchanged. An explicitly
+    // supplied but invalid profile still enables fail-closed service policy.
+    return mode == DM_NET_NEXTENDO || (mode == DM_NET_AUTO && profile && *profile);
+}
 static inline int dm_net_ldn_enabled(void) {
     dm_net_mode_t mode = dm_net_mode();
     return mode == DM_NET_LDN || mode == DM_NET_AUTO;
 }
 int dm_net_enabled(void);
+// Startup-only DNS policy: -1 refuses, 0 keeps the name, 1 supplies IPv4.
+// Only explicit Nextendo/auto modes consult the provider.
+typedef int (*dm_net_dns_provider)(const char *host, char *output, size_t capacity);
+void dm_net_set_dns_provider(dm_net_dns_provider provider);
 // Internal host API: caller owns the CLOEXEC, non-blocking duplicate. Closing or
 // reusing the guest descriptor cannot attach the duplicate to another connection.
 int dm_net_dup_native(int guest);
@@ -67,6 +79,10 @@ int dm_net_getaddrinfo(const char *host, const char *service, const void *hints,
 int dm_net_getaddrinfo_legacy(const char *host, const char *service, const void *hints, void **result);
 void dm_net_freeaddrinfo(void *result);
 void *dm_net_gethostbyname(const char *name);
+// The cancellation identity owns no socket or registry slot until a query starts.
+void *dm_net_gethostbyname_cancel(const char *name, uint32_t cancel_id);
+uint32_t dm_net_request_cancel_handle(void);
+int dm_net_cancel(uint32_t cancel_id);
 int dm_net_ipconfig(uint32_t *address, uint32_t *mask, uint32_t *gateway, uint32_t *dns1, uint32_t *dns2);
 int dm_nifm_available(void);
 void dm_nifm_submit_wait(void);

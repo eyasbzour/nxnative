@@ -340,6 +340,7 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - controller-button icons in text show as `?`. → [Nintendo-extension glyphs for button icons](../reference/services.md#nintendo-extension-glyphs-for-button-icons)
 - on a phone, `GetSharedFontLoadState` would report "not loaded". → [Shared fonts on iOS](../reference/services.md#shared-fonts-on-ios)
 - a crash after the shared fonts load, looking up the "?" glyph (`nro0+0xaef8a8`, a null pointer from nn::font's texture cache), with `ScalableFontEngine::LoadFont` returning 201 on one engine and 0 on another, and `SetFont` 301. → [A shared font larger than the game's font engine memory](../reference/services.md#a-shared-font-larger-than-the-games-font-engine-memory)
+- the game reports that it cannot load its current calendar even when the data is present and the host has an accurately synchronized clock. → [Network clock availability rejects a synchronized host](../reference/services.md#network-clock-availability-rejects-a-synchronized-host)
 - SDK calls that reach the time service, each aborting in `sm::Initialize` (or found in the imports before they were met). → [Steady clock, clock snapshots and user clocks](../reference/services.md#steady-clock-clock-snapshots-and-user-clocks)
 - `Break#1 reason=0 Result=0 svc at sdk+0x370f24` right after the first save at the title, with `bt: sdk+0x175f00 sdk+0x175fc4 sdk+0x176060 sdk+0x375b88 main+0x6ea74 …` (`diag::detail::OnAssertionFailure` called from `time::ClaimPeriodicBenefitWithUserSystemClock`). → [A periodic benefit claim without the time service session](../reference/services.md#a-periodic-benefit-claim-without-the-time-service-session)
 - a call the host answers reads as failed when it succeeded, or reads leftover register bits. Super Smash Bros. Ultimate refills the Spirit Board at every visit, since the elapsed time between two snapshots never reads as known. → [Hooks whose return type did not match the SDK](../reference/services.md#hooks-whose-return-type-did-not-match-the-sdk)
@@ -371,8 +372,16 @@ One line per symptom in the [subsystem references](../reference/): what you see 
 - a null read at boot in `nn::os::SdkMutexType` under `nn::gs::sdk::SetGraphicsFrameLengthMode`, called from `nn::oe::SetGraphicsTargetFrameRate`. → [The target frame rate (graphics frame length)](../reference/services.md#the-target-frame-rate-graphics-frame-length)
 - a Switch 2 game presents at 720p, with its upscaler at the matching low size. → [The display's largest buffer](../reference/services.md#the-displays-largest-buffer)
 - a native port cannot create or join a game's LAN or local-wireless room because its socket and LDN service hooks always return unavailable. → [Opt-in native LAN sockets and LDN over IP](../reference/services.md#opt-in-native-lan-sockets-and-ldn-over-ip)
+- the SDK's cancellable `GetHostByName` path reaches an unavailable resolver service or cannot retire its pending lookup when canceled or finalized. → [SDK DNS cancellation cannot retire an in-flight lookup](../reference/services.md#sdk-dns-cancellation-cannot-retire-an-in-flight-lookup)
+- a calendar-dependent title can boot with no delivery data or read an older snapshot before an asynchronous refresh finishes. → [Optional calendar data is stale or absent at the first guest read](../reference/services.md#optional-calendar-data-is-stale-or-absent-at-the-first-guest-read)
 - `registered NROs not found` from `nro_collect.py` in a game whose RomFS has an NRR, or `[RED] ro::LoadModule: no rewritten NRO with SHA-256 …`. `main` is small (about 600 KB of code) beside a data segment of random-looking bytes. → [A game that decodes its code at run time](../reference/services.md#a-game-that-decodes-its-code-at-run-time)
 - a crash in `ro::RegisterModuleInfo`, or an NRR that seems to register millions of hashes: the words at +0x340 and +0x344 are random. → [NRR version 1](../reference/services.md#nrr-version-1)
+
+## Optional online-service backend
+
+- an enabled native socket connects, but the SDK's TLS context is still an unavailable-service cut. → [Native client TLS](../reference/online-services.md#native-client-tls)
+- a service template reaches native DNS unchanged, or an IP handoff loses the logical TLS service identity. → [Explicit routing and NSD](../reference/online-services.md#explicit-routing-and-nsd)
+- a service transport works but the SDK has no usable account identity/token or friends snapshot. → [Account and social providers](../reference/online-services.md#account-and-social-providers)
 
 ## Movies
 
