@@ -156,7 +156,8 @@ jobs:
           test -f "parts/${IPA_NAME}.ipa.part-00" || { echo "the IPA split produced nothing"; exit 1; }
           ls -lh parts
           tag="ipa-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" parts/"${IPA_NAME}".ipa.part-* \
+          # a draft: the IPA holds the game, so only people with push access to this fork see the release
+          gh release create "$tag" --draft parts/"${IPA_NAME}".ipa.part-* \
           --title "$IPA_NAME (run ${GITHUB_RUN_NUMBER})" \
             --title "IPA (run $GITHUB_RUN_NUMBER)" \
             --notes "Join the parts with join_ipa.ps1 from the kit, then follow the kit's install steps."
