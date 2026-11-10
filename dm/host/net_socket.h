@@ -61,6 +61,10 @@ int dm_net_errno(void);
 void dm_net_set_errno(int e);
 int dm_net_socket(int family, int type, int protocol);
 int dm_net_close(int fd);
+// Event descriptors in a network mode, in the socket table's numbering (hle_net_backend.c): Horizon's EventFd flags, Linux errno through dm_net_errno
+int dm_net_eventfd(uint64_t initial, int flags);
+int dm_net_eventfd_read(int fd, uint64_t *value);
+int dm_net_eventfd_write(int fd, uint64_t value);
 void dm_net_finalize(void);
 int dm_net_bind(int fd, const void *addr, unsigned len);
 int dm_net_connect(int fd, const void *addr, unsigned len);
