@@ -61,15 +61,18 @@ static int sk_idle(int64_t ms) { if (ms < 0) return dm_net_idle(); if (ms > INT6
 typedef struct { int32_t fd; int16_t events, revents; } sk_pollfd;
 // EventFd is a local descriptor of the bsd service and works with no network, so it is real here: gRPC (nn::npln, Ocarina of Time at startup) wakes its pollers with one, and with no
 // wakeup descriptor its poll engine's factory (main+0x21f1280) returns null and grpc_init calls abort (main+0x21f0c7c). The descriptors are the host's only ones: Socket still fails.
-// The flags are Horizon's: gRPC creates its descriptor with 6 and consumes after a poll says it is ready. A descriptor with bit 0 reads one at a time; bits 1 and 2 never block
-enum { EFD_BASE = 0x4000, EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_EBADF = 9, SK_EAGAIN = 35 };
+// The flags are Horizon's: gRPC creates its descriptor with 6 and consumes after a poll says it is ready. A descriptor with bit 0 reads one at a time; bits 1 and 2 never block.
+// The numbers are the bsd service's: the lowest free one, from 0, as for its sockets (the host makes no other descriptor). Games size their tables for those small numbers: Minecraft's
+// NetherNet threads put theirs in a 1024-bit fd_set on the stack for Select (FD_SET at main+0x18b2ae8 in 1.21.120), and when the host numbered them from 0x4000 the bit landed 2 KB
+// past the set and the thread crashed (SIGBUS)
+enum { EFD_MAX = 64, SK_POLLIN = 1, SK_POLLOUT = 4, SK_POLLRDNORM = 0x40, SK_POLLWRNORM = 4, SK_POLLNVAL = 0x20, SK_EBADF = 9, SK_EAGAIN = 35 };
 static struct { uint64_t count; int used, flags; } g_efd[EFD_MAX];
 static pthread_mutex_t g_efd_m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_efd_c = PTHREAD_COND_INITIALIZER;
-static int efd_used(int fd) { return fd >= EFD_BASE && fd < EFD_BASE + EFD_MAX && g_efd[fd - EFD_BASE].used; }   // with g_efd_m held
+static int efd_used(int fd) { return fd >= 0 && fd < EFD_MAX && g_efd[fd].used; }   // with g_efd_m held
 static int efd_create(uint64_t v, int flags) {
     pthread_mutex_lock(&g_efd_m);
-    for (int i = 0; i < EFD_MAX; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].count = v; g_efd[i].flags = flags; pthread_mutex_unlock(&g_efd_m); return EFD_BASE + i; }
+    for (int i = 0; i < EFD_MAX; i++) if (!g_efd[i].used) { g_efd[i].used = 1; g_efd[i].count = v; g_efd[i].flags = flags; pthread_mutex_unlock(&g_efd_m); return i; }
     pthread_mutex_unlock(&g_efd_m);
     LOG("[RED] net: more than %d event descriptors", EFD_MAX);
     dm_net_set_errno(24); return -1;   // EMFILE
@@ -77,7 +80,7 @@ static int efd_create(uint64_t v, int flags) {
 static int efd_close(int fd) {
     pthread_mutex_lock(&g_efd_m);
     int ok = efd_used(fd);
-    if (ok) { g_efd[fd - EFD_BASE].used = 0; pthread_cond_broadcast(&g_efd_c); }
+    if (ok) { g_efd[fd].used = 0; pthread_cond_broadcast(&g_efd_c); }
     pthread_mutex_unlock(&g_efd_m);
     if (!ok) return sk_fail();
     return 0;
@@ -87,7 +90,7 @@ static int efd_read(int fd, uint64_t *out) {
     int r = -1;
     for (;;) {
         if (!efd_used(fd)) { dm_net_set_errno(SK_EBADF); break; }
-        uint64_t *c = &g_efd[fd - EFD_BASE].count; int f = g_efd[fd - EFD_BASE].flags;
+        uint64_t *c = &g_efd[fd].count; int f = g_efd[fd].flags;
         if (*c) { if (f & 1) { *out = 1; *c -= 1; } else { *out = *c; *c = 0; } r = 0; break; }
         if (f & 6) { dm_net_set_errno(SK_EAGAIN); break; }
         dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() ? 1000000 : 100000000);
@@ -98,19 +101,20 @@ static int efd_read(int fd, uint64_t *out) {
 static int efd_write(int fd, uint64_t v) {
     pthread_mutex_lock(&g_efd_m);
     int ok = efd_used(fd);
-    if (ok) { g_efd[fd - EFD_BASE].count += v; pthread_cond_broadcast(&g_efd_c); }
+    if (ok) { g_efd[fd].count += v; pthread_cond_broadcast(&g_efd_c); }
     pthread_mutex_unlock(&g_efd_m);
     if (!ok) { dm_net_set_errno(SK_EBADF); return -1; }
     return 0;
 }
-static int efd_ready(sk_pollfd *p, uint64_t n) {   // with g_efd_m held: fills revents, returns how many descriptors have any
+// With g_efd_m held: fills revents, returns how many descriptors have any. open holds the descriptors that were open when the wait began: one of those closed since is POLLNVAL, any other
+// is one the host never made, with nothing to say (see dm_sk_poll). The numbers start at 0, where a game's stale or never-valid descriptors fall too, so the range alone cannot tell them apart
+static int efd_ready(sk_pollfd *p, uint64_t n, uint64_t open) {
     int ready = 0;
     for (uint64_t i = 0; i < n; i++) {
         p[i].revents = 0;
-        if (p[i].fd < 0) continue;
-        if (p[i].fd < EFD_BASE || p[i].fd >= EFD_BASE + EFD_MAX) continue;   // one the host never made: nothing to say (see dm_sk_poll)
-        if (!efd_used(p[i].fd)) { p[i].revents = 0x20; ready++; continue; }   // POLLNVAL: closed while waiting
-        if (g_efd[p[i].fd - EFD_BASE].count) p[i].revents |= p[i].events & (SK_POLLIN | SK_POLLRDNORM);
+        if (p[i].fd < 0 || p[i].fd >= EFD_MAX || !(open >> p[i].fd & 1)) continue;
+        if (!efd_used(p[i].fd)) { p[i].revents = SK_POLLNVAL; ready++; continue; }   // closed while waiting
+        if (g_efd[p[i].fd].count) p[i].revents |= p[i].events & (SK_POLLIN | SK_POLLRDNORM);
         p[i].revents |= p[i].events & (SK_POLLOUT | SK_POLLWRNORM);
         if (p[i].revents) ready++;
     }
@@ -129,15 +133,15 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     }
     if (n > 1024 || (!fds && n)) { dm_net_set_errno(!fds && n ? 14 : 22); dmnd_record(DMND_SOCKET,DMND_OP_POLL,(int32_t)n,ms,-1,dm_net_errno(),0,__builtin_return_address(0),0); return -1; }
     sk_pollfd *p = fds;
-    int any = 0;
+    uint64_t open = 0;   // EFD_MAX is 64: one bit per descriptor
     pthread_mutex_lock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) if (p[i].fd >= 0) {
-        if (efd_used(p[i].fd)) { any = 1; continue; }
+        if (efd_used(p[i].fd)) { open |= 1ull << p[i].fd; continue; }
         static int once; if (!once++) LOG("socket: Poll of %llu descriptors with one the host never made (fd %d, events %#x; %d ms): nothing ready at the timeout", (unsigned long long)n, p[i].fd, p[i].events, ms);
     }
     pthread_mutex_unlock(&g_efd_m);
     for (uint64_t i = 0; i < n; i++) p[i].revents = 0;
-    if (!any) {
+    if (!open) {
         int rv = sk_idle(ms);
         if (dm_net_enabled()) { uint32_t pn = atomic_fetch_add_explicit(&g_dmnd.first_poll_efd, 1, memory_order_relaxed); if (pn < DMND_FIRST_POLL_EFD) LOG("net-diag first-poll-unserved #%u n=%llu ms=%d res=%d", pn, (unsigned long long)n, ms, rv); }
         dmnd_record(DMND_SOCKET, DMND_OP_POLL, (int32_t)n, ms, rv, 0, 0, __builtin_return_address(0), 0);
@@ -148,7 +152,7 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     uint64_t start = guest_ns();
     pthread_mutex_lock(&g_efd_m);
     int ready;
-    while (!(ready = efd_ready(p, n))) {
+    while (!(ready = efd_ready(p, n, open))) {
         int64_t left = limit - (int64_t)(guest_ns() - start);
         if (left <= 0) break;
         dm_guest_cond_wait_ns(&g_efd_c, &g_efd_m, dm_detclock_enabled() && left > 1000000 ? 1000000 : left);
@@ -157,14 +161,32 @@ int dm_sk_poll(void *fds, uint64_t n, int ms) {   // also hle_offline.c's plain 
     dmnd_record(DMND_SOCKET, DMND_OP_POLL, (int32_t)n, ms, ready, 0, 0, __builtin_return_address(0), 0);
     return ready;
 }
-int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
-    if (dm_net_enabled()) { int rv = dm_net_select(nfds, (void *)r, (void *)w, (void *)e, tv); dmnd_record(DMND_SOCKET,DMND_OP_SELECT,nfds,0,rv,rv<0?dm_net_errno():0,0,__builtin_return_address(0),0); return rv; }
+// Select is Poll over the descriptors in its sets, so the same rules hold (Minecraft's NetherNet threads wait on their event descriptors this way): the read set asks POLLIN, the write
+// set POLLOUT, and the sets come back with the ready ones. A descriptor closed during the wait fails with EBADF, as select does. Only the host's numbers (below EFD_MAX) are passed on:
+// Poll has nothing to say about any other, and the array stays small on the guest thread's stack. An explicit network mode goes to the transport's Select instead
+int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv) {   // fd_set: 1024 bits; timeval: {i64 seconds, i64 microseconds}
+    if (dm_net_enabled()) { int rv = dm_net_select(nfds, r, w, e, tv); dmnd_record(DMND_SOCKET,DMND_OP_SELECT,nfds,0,rv,rv<0?dm_net_errno():0,0,__builtin_return_address(0),0); return rv; }
     if (nfds < 0 || nfds > 1024 || (tv && (tv[0] < 0 || tv[1] < 0 || tv[1] >= 1000000 || tv[0] > INT64_MAX / 1000))) { dm_net_set_errno(22); dmnd_record(DMND_SOCKET,DMND_OP_SELECT,nfds,0,-1,22,0,__builtin_return_address(0),0); return -1; }
-    const uint64_t *sets[3] = {r, w, e};
-    for (int k = 0; k < 3; k++) for (int fd = 0; sets[k] && fd < nfds && fd < 1024; fd++) if (sets[k][fd >> 6] >> (fd & 63) & 1) { int rv=sk_fail(); uint32_t pn=atomic_fetch_add_explicit(&g_dmnd.first_poll_efd,1,memory_order_relaxed); if (pn < DMND_FIRST_POLL_EFD) LOG("net-diag first-select-fd #%u nfds=%d fd=%d res=%d err=%d", pn, nfds, fd, rv, dm_net_errno()); dmnd_record(DMND_SOCKET,DMND_OP_SELECT,nfds,fd,rv,dm_net_errno(),0,__builtin_return_address(0),0); return rv; }
-    int rv = sk_idle(tv ? tv[0] * 1000 + tv[1] / 1000 : -1);
-    dmnd_record(DMND_SOCKET, DMND_OP_SELECT, nfds, 0, rv, 0, 0, __builtin_return_address(0), 0);
-    return rv;
+    uint64_t *sets[3] = {r, w, e};
+    static const int16_t ask[3] = {SK_POLLIN, SK_POLLOUT, 0};
+    sk_pollfd p[EFD_MAX]; int np = 0;
+    for (int fd = 0; fd < nfds && fd < EFD_MAX; fd++) {
+        int in = 0; int16_t ev = 0;
+        for (int k = 0; k < 3; k++) if (sets[k] && sets[k][fd >> 6] >> (fd & 63) & 1) { in = 1; ev |= ask[k]; }
+        if (in) p[np++] = (sk_pollfd){fd, ev, 0};
+    }
+    int64_t ms = tv ? tv[0] * 1000 + tv[1] / 1000 : -1;
+    if (ms > 0x7fffffff) ms = 0x7fffffff;
+    dm_sk_poll(p, (uint64_t)np, (int)ms);
+    for (int k = 0; k < 3; k++) if (sets[k]) for (int fd = 0; fd < nfds; fd++) sets[k][fd >> 6] &= ~(1ull << (fd & 63));
+    int n = 0;
+    for (int i = 0; i < np; i++) {
+        if (p[i].revents & SK_POLLNVAL) { dm_net_set_errno(SK_EBADF); dmnd_record(DMND_SOCKET,DMND_OP_SELECT,nfds,p[i].fd,-1,SK_EBADF,0,__builtin_return_address(0),0); return -1; }
+        if (p[i].revents & (SK_POLLIN | SK_POLLRDNORM) && r) { r[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
+        if (p[i].revents & SK_POLLOUT && w) { w[p[i].fd >> 6] |= 1ull << (p[i].fd & 63); n++; }
+    }
+    dmnd_record(DMND_SOCKET, DMND_OP_SELECT, nfds, 0, n, 0, 0, __builtin_return_address(0), 0);
+    return n;
 }
 SKF("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", h_sk_Socket, int a, int b, int c) { return dmnd_sock(dm_net_socket(a, b, c),DMND_OP_SOCKET,0,0); }
 SKF("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", h_sk_Bind, int s, const void *a, unsigned n) { return dmnd_sock(dm_net_bind(s, a, n),DMND_OP_BIND,0,0); }

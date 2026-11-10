@@ -48,11 +48,11 @@ HLE_FORCE("_ZN2nn6socket12GetLastErrnoEv", "Horizon Linux errno in LAN mode; ENE
 HLE_FORCE("_ZN2nn6socket6SocketEiii", "socket transport, offline by default", int, h_sk_Socket3i, int a, int b, int c) { return dm_net_socket(a, b, c); }
 HLE_FORCE("_ZN2nn6socket8ShutdownEii", "socket transport, offline by default", int, h_sk_Shutdown, int s, int h) { return dm_net_shutdown(s, h); }
 HLE_FORCE("_ZN2nn6socket4BindEiPK8sockaddrj", "socket transport, offline by default", int, h_sk_Bind, int s, const void *a, unsigned n) { return dm_net_bind(s, a, n); }
-int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: nothing to wait on → the timeout passes, 0; else -1
-int dm_sk_select(int nfds, const uint64_t *r, const uint64_t *w, const uint64_t *e, const int64_t *tv);
-HLE_FORCE_WAIT("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_PollPlain, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
+int dm_sk_poll(void *fds, uint64_t n, int ms);   // hle_net.c: waits on the host's event descriptors; with none the timeout passes, 0
+int dm_sk_select(int nfds, uint64_t *r, uint64_t *w, uint64_t *e, const int64_t *tv);
+HLE_FORCE_WAIT("_ZN2nn6socket4PollEP6pollfdmi", "offline: waits on the host's event descriptors; nothing else is ever ready", int, h_sk_PollPlain, void *p, uint64_t n, int t) { return dm_sk_poll(p, n, t); }
 // SDK 4's Select with plain fd_set / timeval (Dark Souls Remastered)
-HLE_FORCE_WAIT("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: waits out the timeout when there is nothing to wait on, else fails", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
+HLE_FORCE_WAIT("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", "offline: Poll over its sets (the host's event descriptors; nothing else is ever ready)", int, h_sk_Select2, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
 HLE_FORCE_WAIT("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", "socket transport, offline by default", long, h_sk_SendTo, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_net_send(s, b, n, f, a, al); }
 HLE_FORCE_WAIT("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", "socket transport, offline by default", long, h_sk_SendTo2, int s, const void *b, unsigned long n, int f, const void *a, unsigned al) { return dm_net_send(s, b, n, f, a, al); }
 HLE_FORCE_WAIT("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", "socket transport, offline by default", long, h_sk_RecvFrom2, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_net_recv(s, b, n, f, a, al); }
