@@ -33,7 +33,7 @@ void dm_nextendo_sign_out(void) { nxl_write_refresh(nil); }
         if ([scene isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)scene).windows) if (w.isKeyWindow) return w;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes)
         if ([scene isKindOfClass:UIWindowScene.class] && ((UIWindowScene *)scene).windows.count) return ((UIWindowScene *)scene).windows.firstObject;
-    return [ASPresentationAnchor new];
+    return [[UIWindow alloc] init];   // ASPresentationAnchor is UIWindow on iOS; the launcher's window is always there, so this is not reached
 }
 @end
 
