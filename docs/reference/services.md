@@ -733,6 +733,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `t_net_eventfd` (`make -C dm/host/tests GAME=<id> run`).
 - **Found on:** Minecraft (Bedrock Edition, 1.21.120).
 
+### A Nextendo account needs a sign-in on the Mac
+
+- **Symptom:** in Nextendo mode a game finds its network service account unavailable, and the log says `nextendo: no game credential`.
+- **Cause:** the online backend (`hle_nextendo_apple.m`) takes the account from a credential provider the embedding app installs, and reads nothing itself. The host had none, so no game token was ever available.
+- **Fix:** `dm/tools/nextendo_login.m` signs the Mac in: Nextendo's sign-in page in the browser (OAuth with PKCE, a `127.0.0.1` redirect), then the refresh token in a private file (`DM_NEXTENDO_LOGIN_DIR`). The host's provider (`hle_nextendo_login_mac.m`) turns it into a fresh game token when a game asks, and builds the record from the token's own payload, so the backend's identity and expiry checks see what Nextendo issued. A failed fetch is retried after 30 s and the account stays unavailable meanwhile. The flow is Mush8's (`launcher/Nextendo.swift`), and so is the client ID for now, until this fork registers its own; these files are GPL-3.0. Build the tool with `make -C dm/host nextendo_login`, then run `dm/host/nextendo_login sign-in`; `status` and `sign-out` do what they say.
+- **Check:** `make -C dm/host/tests GAME=<id> nextendo-account` (the record passes the backend's decoder; the stored sign-in is owner-only and no link stands in for it; the tool compiles).
+- **Found on:** planned for Super Mario Bros. Wonder online; Nextendo issues the game token only to an account with a confirmed e-mail and a linked Discord account (Mush8's message).
+
 ### `EventFd` in a network mode shares the socket numbering
 
 - **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.
