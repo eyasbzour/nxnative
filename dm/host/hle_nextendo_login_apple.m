@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The Mac host's Nextendo credential provider (dm_nextendo_set_credential_provider, hle_nextendo_apple.m): when a game in Nextendo mode needs its account, the
-// sign-in stored by dm/tools/nextendo_login.m becomes a fresh game token (nextendo_login_apple.inc, after Mush8's launcher). The record is kept until two minutes
-// before its token expires; a failed fetch waits 30 s before the next try and the game sees an account that is not available, never an invented one.
-// Only the Mac: the iPhone app has no sign-in yet.
+// The host's Nextendo credential provider (dm_nextendo_set_credential_provider, hle_nextendo_apple.m) on the Mac and the iPhone: when a game in Nextendo mode needs
+// its account, the stored sign-in becomes a fresh game token (nextendo_login_apple.inc, after Mush8's launcher). The Mac signs in with dm/tools/nextendo_login.m, the
+// iPhone on the game's settings screen (dm/ios/Sources/NextendoSignIn.m). The record is kept until two minutes before its token expires; a failed fetch waits 30 s
+// before the next try and the game sees an account that is not available, never an invented one.
 #include <TargetConditionals.h>
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || TARGET_OS_IOS
 #import "nextendo_login_apple.inc"
 #include "nextendo_account.h"
 #include <pthread.h>

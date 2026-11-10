@@ -61,6 +61,38 @@ private struct CloudSavesSection: View {
     }
 }
 
+/// Nextendo: the account a game in Nextendo mode plays online with (NextendoSignIn.m). Only in an app built with --nextendo.
+private struct NextendoSection: View {
+    @State private var account: String? = nil
+    @State private var note = ""
+    @State private var busy = false
+
+    var body: some View {
+        Section {
+            HStack {
+                Text("Nextendo account")
+                Spacer()
+                Text(busy ? "Checking…" : account ?? "Not signed in").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            if dm_nextendo_signed_in() {
+                Button("Sign out", role: .destructive) { dm_nextendo_sign_out(); account = nil; note = "" }.disabled(busy)
+            } else {
+                Button("Sign in…") {
+                    busy = true; note = ""
+                    dm_nextendo_sign_in { a, e in busy = false; account = a; note = e ?? "" }
+                }.disabled(busy)
+            }
+        } header: { Text("Online") } footer: {
+            Text(note.isEmpty ? "Online play goes through Nextendo, a community service. Set Network to Nextendo to use it. The account needs a confirmed e-mail and a linked Discord account." : note)
+        }
+        .onAppear {
+            guard dm_nextendo_signed_in() else { return }
+            busy = true
+            dm_nextendo_check { a, e in busy = false; account = a; note = e ?? "" }
+        }
+    }
+}
+
 /// UIDocumentPickerViewController for a folder, in the two callbacks a SwiftUI sheet wants.
 private struct DocumentPicker: UIViewControllerRepresentable {
     var types: [UTType] = [.folder]
@@ -129,6 +161,7 @@ private struct LauncherView: View {
                     } footer: {
                         Text("Brings back all settings this game was tested with.")
                     }
+                    if dm_nextendo_built() { NextendoSection() }
                     CloudSavesSection()
                     Section {
                         HStack {

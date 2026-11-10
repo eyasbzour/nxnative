@@ -12,6 +12,8 @@
 #include <mach-o/ldsyms.h>
 #include "hle.h"
 #include "net_socket.h"
+
+static char g_nextendo_dir[1024];   // Nextendo's patched main, when it is the one loaded (nextendo_main)
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
 #endif
@@ -744,6 +746,8 @@ void dm_set_game_image_header(const void *mh) { g_game_image = mh; }
 typedef struct { char name[32]; uint64_t off[3][2]; } nro_ent;
 // DM_EMBED_TAG (main.m, an app holding several programs of one game): the running program's sections are tagged (gen_embed.py --tag: __dm<tag><name>x0, …, __dm<tag>_nro_x0)
 static const char *embed_tag(void) { const char *t = getenv("DM_EMBED_TAG"); return t ? t : ""; }
+// The embedded module's name: Nextendo's patched main is nmain (gen_embed.py, nextendo_main)
+static const char *embed_name(const module_t *m) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? "nmain" : m->name; }
 static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, const uint8_t **w, unsigned long *zw, const uint8_t **x1, unsigned long *z1) {
     unsigned long zt, s0, sw, s1;
     char st[17], s0n[17], swn[17], s1n[17]; const char *g = embed_tag();
@@ -759,8 +763,8 @@ static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, c
 }
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
-    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag();
-    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, m->name); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, m->name); snprintf(dm, sizeof dm, "__DM%s%sW", g, m->name);
+    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag(), *nm = embed_name(m);
+    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, nm); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, nm); snprintf(dm, sizeof dm, "__DM%s%sW", g, nm);
     unsigned long z0 = 0, zw = 0, z1 = 0;
     const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
     if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
@@ -769,7 +773,7 @@ static void map_image(module_t *m, const char *dir) {
     // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
     unsigned long z2 = 0; const uint8_t *x2 = NULL;
     if (m->back_len) {
-        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, m->name);
+        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, nm);
         if (m->nro || !(x2 = getsectiondata(IMAGE_MH, "__TEXT", sx2, &z2)) || z2 != m->back_len || ((uintptr_t)x2 & 0x3FFF)) die("embedded back patch area %s missing or wrong", sx2);
     }
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
@@ -842,12 +846,11 @@ static char g_module_dir[1024];   // the folder the modules were loaded from (dm
 const char *dm_module_dir(void) { return g_module_dir; }
 
 // A --nextendo build (scripts/build_ipa_from_nsp.py nextendo_build) rewrites a copy of main with Nextendo's signed game patch into <dir>/nextendo. With Nextendo on
-// (net_socket.h dm_net_nextendo_enabled), main comes from there; offline, LAN and LDN keep the original. The Mac only: the iPhone's modules are embedded in the app, without the copy
-static char g_nextendo_dir[1024];
+// (net_socket.h dm_net_nextendo_enabled), main comes from there; offline, LAN and LDN keep the original. On the iPhone, <dir>/nextendo holds the copy's tables and its
+// code is embedded as module nmain (gen_embed.py; g_nextendo_dir, map_image)
 static const char *module_dir(const module_t *m, const char *dir) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? g_nextendo_dir : dir; }
 static void nextendo_main(const char *dir) {
     g_nextendo_dir[0] = 0;
-#if !TARGET_OS_IPHONE
     if (!dm_net_nextendo_enabled()) return;
     char path[1100]; struct stat st;
     if ((size_t)snprintf(g_nextendo_dir, sizeof g_nextendo_dir, "%s/nextendo", dir) >= sizeof g_nextendo_dir) die("Nextendo: module folder path too long: %s", dir);
@@ -857,9 +860,6 @@ static void nextendo_main(const char *dir) {
         g_nextendo_dir[0] = 0; return;
     }
     LOG("Nextendo: main from %s (Nextendo's signed game patch)", g_nextendo_dir);
-#else
-    (void)dir;
-#endif
 }
 
 void load_modules(const char *dir, const char **names, int n) {

@@ -11,7 +11,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <errno.h>
-#import "../nextendo_login_apple.inc"   // the Mac sign-in (hle_nextendo_login_mac.m): its record must pass this decoder
+#import "../nextendo_login_apple.inc"   // the sign-in (hle_nextendo_login_apple.m): its record must pass this decoder
 
 static int checks, failures;
 static _Atomic int entered, left, waits, providerCalls;

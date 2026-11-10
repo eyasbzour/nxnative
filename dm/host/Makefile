@@ -83,7 +83,7 @@ endif
 endif
 .PHONY: FORCE
 # The Mac Nextendo sign-in tool: make -C dm/host nextendo_login, then dm/host/nextendo_login sign-in (status, sign-out). dmhost reads the sign-in it keeps
-# (hle_nextendo_login_mac.m, nextendo_login_apple.inc)
+# (hle_nextendo_login_apple.m, nextendo_login_apple.inc)
 nextendo_login: ../tools/nextendo_login.m nextendo_login_apple.inc
 	clang -O1 -g -fobjc-arc -Wall -Wextra -mmacosx-version-min=$(MACOS_MIN) -o $@ ../tools/nextendo_login.m -framework Foundation -framework Security -framework AppKit
 FORCE:
