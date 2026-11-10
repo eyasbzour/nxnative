@@ -22,7 +22,6 @@ void thr_svc_leave(void) {}
 void dm_spin_wait(uint64_t r, uint64_t a) { (void)r; (void)a; }
 uint64_t svc_dispatch(int n, uint64_t *r, uint64_t a) { (void)n; (void)r; (void)a; return 0; }
 uint64_t unimpl_stubs[4096];
-pthread_key_t g_key18;   // a gate's x18 result (hle.c's gate_dispatch; loader.c in the host); the test reaches no gate
 static const char *wrap_kind;
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)name; wrap_kind = kind; return fn; }
 
