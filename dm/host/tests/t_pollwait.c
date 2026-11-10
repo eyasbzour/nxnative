@@ -88,6 +88,7 @@ static void *signaller(void *unused) {
     return NULL;
 }
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);   // each PASS line reaches the log as it passes, so a SIGALRM names the case that hung
     alarm(20);
     me_handle = svc_thread_main_init();
     poll_run(500, 0, 0);
