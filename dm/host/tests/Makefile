@@ -510,7 +510,7 @@ DM_OPENSSL_ROOT ?= $(shell python3 ../../tools/apple_crypto.py macos)
 PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
 PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
 OPENSSL_TOOL ?= $(shell command -v openssl)
-SSL_SOURCES = t_ssl.m t_net_write_stub.c ../hle_ssl.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
+SSL_SOURCES = t_ssl.m t_net_write_stub.c ../hle_ssl.c ../hle_net_diag.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
 SSL_DEPS = t_gate_fixture.h ../nsd.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
 SSL_FLAGS = -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror -Wno-unused-function $(GINC)
 $(B)/t_ssl $(B)/t_ssl_asan $(B)/t_nextendo_routes $(B)/t_nextendo_routes_asan: ../ssl_trace.h
