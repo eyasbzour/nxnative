@@ -11,6 +11,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "net_socket.h"
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
 #endif
@@ -840,8 +841,30 @@ static void map_image(module_t *m, const char *dir) {
 static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
 const char *dm_module_dir(void) { return g_module_dir; }
 
+// A --nextendo build (scripts/build_ipa_from_nsp.py nextendo_build) rewrites a copy of main with Nextendo's signed game patch into <dir>/nextendo. With Nextendo on
+// (net_socket.h dm_net_nextendo_enabled), main comes from there; offline, LAN and LDN keep the original. The Mac only: the iPhone's modules are embedded in the app, without the copy
+static char g_nextendo_dir[1024];
+static const char *module_dir(const module_t *m, const char *dir) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? g_nextendo_dir : dir; }
+static void nextendo_main(const char *dir) {
+    g_nextendo_dir[0] = 0;
+#if !TARGET_OS_IPHONE
+    if (!dm_net_nextendo_enabled()) return;
+    char path[1100]; struct stat st;
+    if ((size_t)snprintf(g_nextendo_dir, sizeof g_nextendo_dir, "%s/nextendo", dir) >= sizeof g_nextendo_dir) die("Nextendo: module folder path too long: %s", dir);
+    snprintf(path, sizeof path, "%s/main.fixups.tsv", g_nextendo_dir);
+    if (lstat(path, &st) || !S_ISREG(st.st_mode)) {
+        LOG("Nextendo: no patched main in %s (the build had no --nextendo, or Nextendo publishes no patch for this build): the original main runs online", g_nextendo_dir);
+        g_nextendo_dir[0] = 0; return;
+    }
+    LOG("Nextendo: main from %s (Nextendo's signed game patch)", g_nextendo_dir);
+#else
+    (void)dir;
+#endif
+}
+
 void load_modules(const char *dir, const char **names, int n) {
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
+    nextendo_main(dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
@@ -850,16 +873,16 @@ void load_modules(const char *dir, const char **names, int n) {
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        read_layout(m, module_dir(m, dir));
     }
     create_keys();
     jit_layout_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, module_dir(m, dir)); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
+        t = now_ns(); register_gates(m, module_dir(m, dir)); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }

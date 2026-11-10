@@ -741,6 +741,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-account` (the record passes the backend's decoder; the stored sign-in is owner-only and no link stands in for it; the tool compiles).
 - **Found on:** planned for Super Mario Bros. Wonder online; Nextendo issues the game token only to an account with a confirmed e-mail and a linked Discord account (Mush8's message).
 
+### A game online on Nextendo needs its route profile and Nextendo's game patch
+
+- **Symptom:** with `DM_NETWORK=nextendo` and a sign-in, the game still cannot reach Nextendo: every Nintendo host name is refused (no `DM_NEXTENDO_ROUTES`), or the game connects and then fails because its own code still expects Nintendo's servers.
+- **Cause:** the backend routes only the hosts a profile names and trusts only the provider CA the profile carries (`hle_nextendo_routes.c`), and the repository shipped no profile. Some games also need a small patch to their own code before they talk to Nextendo; Nextendo publishes these for exact builds as a signed catalog (Super Mario Bros. Wonder 1.2.1 has one, an NPLN game).
+- **Fix:** `scripts/build_ipa_from_nsp.py --platform mac --nextendo` does both, after NX-Port-Studio's build (MIT). `dm/tools/nextendo_services.py` writes the public profile from `dm/net/nextendo-services.json` into `<id>_build/nextendo-services` (`routes.tsv`, the provider CA it downloads and checks by SHA-256, and `manifest.json`, whose identity namespaces `hle_nextendo_api_apple.m` reads). `dm/tools/nextendo_patches.py` fetches the catalog, checks its Ed25519 signature and expiry with `dm/tools/nextendo_verify.swift`, and refuses a rollback. When it lists the game's exact main build (all 32 bytes of the build ID) and every guarded byte matches, it patches a copy of main, which `patch_nso.py` rewrites into `patched_<ver>/nextendo`. With Nextendo on, the loader maps main from there (`loader.c` `nextendo_main`). Offline, LAN and LDN keep the original main, and a build Nextendo lists no patch for runs its original main online. The run command the build prints then has `DM_NETWORK=nextendo` and `DM_NEXTENDO_ROUTES`. Only for a Mac-only build for now: a Mac app and the iPhone do not carry the second main.
+- **Check:** `dm/tools/tests/test_nextendo_patches.py` (synthetic catalogs: exact identity, guards, IPS32 bounds, an NSO copy with its build ID and segment hashes) and `dm/tools/tests/test_nextendo_services.py` (routes and manifest for Wonder).
+- **Found on:** not yet run against Nextendo; first target Super Mario Bros. Wonder 1.2.1 (the catalog lists its patch as unverified in play).
+
 ### `EventFd` in a network mode shares the socket numbering
 
 - **Symptom:** with `DM_NETWORK` set to a network mode, a game that uses gRPC (`nn::npln`) aborts in `grpc_init` as it does offline without event descriptors, or its poller never wakes while it polls its sockets.
