@@ -30,7 +30,8 @@ def provider_ca(value):
         data = cache.read_bytes()
         if hashlib.sha256(data).hexdigest() == value['provider']['caSHA256']: return data
     url = value['provider']['caURL']
-    if not url.startswith('https://raw.githubusercontent.com/NextendoNetwork/Prelude-Nextendo/'):
+    # Nextendo's own Git server, where Prelude-Nextendo moved from GitHub (the old raw.githubusercontent.com address is 404); the SHA-256 below is the trust, not the host
+    if not url.startswith('https://git.nextendo.network/NextendoNetwork/Prelude-Nextendo/raw/commit/'):
         raise ValueError('The provider CA must come from its official source')
     request = urllib.request.Request(url, headers={'User-Agent': 'nxnative'})
     with urllib.request.urlopen(request, timeout=15) as response: encoded = response.read(65537)
