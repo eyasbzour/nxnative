@@ -118,12 +118,19 @@ jobs:
               print(e['url'] + '\t' + e['out'])
           PY
           mkdir -p game
+          # aria2c gives up on a 530 (the tunnel has no connection to the PC: its Wi-Fi dropped, a sleep), so each file is tried
+          # again for up to 30 minutes of such outages; --continue keeps what arrived, and the next try asks only for the rest
           while IFS=$'\t' read -r url out; do
             echo "downloading: $out"
-            aria2c --console-log-level=warn --summary-interval=60 --max-tries=30 --retry-wait=10 \
-              --connect-timeout=30 --continue --file-allocation=none \
-              --max-connection-per-server=8 --split=8 --min-split-size=50M \
-              -d game -o "$out" "$url"
+            for attempt in $(seq 1 60); do
+              if aria2c --console-log-level=warn --summary-interval=60 --max-tries=30 --retry-wait=10 \
+                   --connect-timeout=30 --continue --file-allocation=none \
+                   --max-connection-per-server=8 --split=8 --min-split-size=50M \
+                   -d game -o "$out" "$url" < /dev/null; then break; fi
+              [ "$attempt" = 60 ] && { echo "::error::$out: the feeder stayed unreachable for 30 minutes"; exit 1; }
+              echo "::warning::$out: the feeder is unreachable (try $attempt); trying again in 30 s, resuming what arrived"
+              sleep 30
+            done
             echo "download complete: $out"
           done < dl.tsv
           ls -lh game
