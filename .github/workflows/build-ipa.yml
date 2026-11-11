@@ -1,8 +1,12 @@
 # Build a game IPA with nxnative on GitHub's hosted macOS runners.
 # Add this file to a fork of seedds/nxnative at .github/workflows/build-ipa.yml
 #
-# The game files and prod.keys never touch GitHub or git: the runner downloads
-# them over a temporary tunnel from serve_game.ps1 running on your Windows PC.
+# The game files reach the runner over a temporary tunnel from serve_game.ps1
+# running on your Windows PC. With game_release set, the first run also saves
+# them (never prod.keys) to a draft release of that tag, which only the fork's
+# writers can see, and later runs with the same game_release take them from
+# there, without the feeder. prod.keys comes from the PROD_KEYS secret (base64
+# of the file) when it is set, else from the feeder. Never publish a game_release.
 # When the build finishes, the IPA goes up as release parts (each under 2 GB).
 #
 # Runtime: the registered TotK profile (base v0 + update 1.4.3 = v720896)
@@ -14,8 +18,13 @@ on:
   workflow_dispatch:
     inputs:
       manifest_url:
-        description: "The manifest URL that serve_game.ps1 printed"
-        required: true
+        description: "The manifest URL that serve_game.ps1 printed (not needed when game_release already holds the game files)"
+        required: false
+        default: ""
+      game_release:
+        description: "Tag of a private draft release for the game files, e.g. game-wonder-121: taken from it when it exists, else fetched from the feeder and saved to it"
+        required: false
+        default: ""
       app_name:
         description: "App name on the iPhone home screen"
         required: false
@@ -92,13 +101,71 @@ jobs:
           xcrun -sdk iphoneos metal --version
           python3 dm/gfx/tools/own_compilers.py --check-metal
 
-      - name: Fetch game files from serve_game.ps1 (your PC, over the tunnel)
+      - name: Fetch the game files (a draft release saved by an earlier run, else serve_game.ps1 on your PC)
         working-directory: ${{ runner.temp }}
         env:
           MANIFEST_URL: ${{ inputs.manifest_url }}
+          GAME_RELEASE: ${{ inputs.game_release }}
+          PROD_KEYS_B64: ${{ secrets.PROD_KEYS }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          curl -fsS --retry 10 --retry-delay 5 "$MANIFEST_URL" -o manifest.json
+          mkdir -p game
+          # The release that holds the game files: a draft (only the fork's writers see a draft or its files), found by its tag
+          # name among all releases, as the by-tag lookup does not return drafts
+          rel_id=
+          if [ -n "$GAME_RELEASE" ]; then
+            rel_id=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate --jq ".[] | select(.tag_name == \"$GAME_RELEASE\") | .id" | head -1)
+          fi
+          if [ -n "$rel_id" ]; then
+            echo "game files from the draft release $GAME_RELEASE (no feeder needed)"
+            mkdir -p parts
+            gh api "repos/$GITHUB_REPOSITORY/releases/$rel_id/assets?per_page=100" --paginate --jq '.[] | "\(.id)\t\(.name)"' > assets.tsv
+            while IFS=$'\t' read -r id name; do
+              echo "downloading part: $name"
+              gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "parts/$name" < /dev/null
+            done < assets.tsv
+            # parts/<file>.part-NN back into game/<file>, then each checked against the SHA-256 the saving run recorded
+            for first in parts/*.part-00; do
+              f=$(basename "$first" .part-00)
+              cat "parts/$f".part-* > "game/$f"
+            done
+            (cd game && shasum -a 256 -c ../parts/game.sha256)
+            cp parts/game.json manifest.json
+            rm -rf parts
+          else
+            [ -n "$MANIFEST_URL" ] || { echo "::error::no draft release $GAME_RELEASE and no manifest_url: run serve_game.ps1 and give its manifest URL"; exit 1; }
+            curl -fsS --retry 10 --retry-delay 5 "$MANIFEST_URL" -o manifest.json
+            python3 - <<'PY' > dl.tsv
+          import json, sys
+          m = json.load(open('manifest.json'))
+          files = m.get('files', [])
+          if not files:
+              sys.exit('the manifest holds no files')
+          for e in files:
+              print(e['url'] + '\t' + e['out'])
+          PY
+            # aria2c gives up on a 530 (the tunnel has no connection to the PC: its Wi-Fi dropped, a sleep), so each file is tried
+            # again for up to 30 minutes of such outages; --continue keeps what arrived, and the next try asks only for the rest.
+            # prod.keys comes from the PROD_KEYS secret when it is set, so the feeder's copy is not fetched
+            while IFS=$'\t' read -r url out; do
+              if [ "$out" = prod.keys ] && [ -n "$PROD_KEYS_B64" ]; then continue; fi
+              echo "downloading: $out"
+              for attempt in $(seq 1 60); do
+                if aria2c --console-log-level=warn --summary-interval=60 --max-tries=30 --retry-wait=10 \
+                     --connect-timeout=30 --continue --file-allocation=none \
+                     --max-connection-per-server=8 --split=8 --min-split-size=50M \
+                     -d game -o "$out" "$url" < /dev/null; then break; fi
+                [ "$attempt" = 60 ] && { echo "::error::$out: the feeder stayed unreachable for 30 minutes"; exit 1; }
+                echo "::warning::$out: the feeder is unreachable (try $attempt); trying again in 30 s, resuming what arrived"
+                sleep 30
+              done
+              echo "download complete: $out"
+            done < dl.tsv
+          fi
+          # The keys: the PROD_KEYS secret (base64 of prod.keys), else the feeder's copy. Never saved to a release
+          if [ -n "$PROD_KEYS_B64" ]; then printf '%s' "$PROD_KEYS_B64" | base64 -D > game/prod.keys; echo "prod.keys from the PROD_KEYS secret"; fi
+          [ -s game/prod.keys ] || { echo "::error::no prod.keys: set the PROD_KEYS secret, or give a manifest_url whose feeder serves it"; exit 1; }
           # IPA/release slug: workflow input if given, else derived from the manifest's game name
           # ("The Legend of Zelda Tears of the Kingdom [0100...].xci" -> "the-legend-of-zelda-tears-of-the-kingdom")
           if [ -n "${{ inputs.ipa_name }}" ]; then
@@ -108,34 +175,35 @@ jobs:
           fi
           echo "IPA_NAME=$IPA_NAME" >> "$GITHUB_ENV"
           echo "IPA name: $IPA_NAME"
-          python3 - <<'PY' > dl.tsv
-          import json, sys
-          m = json.load(open('manifest.json'))
-          files = m.get('files', [])
-          if not files:
-              sys.exit('the manifest holds no files')
-          for e in files:
-              print(e['url'] + '\t' + e['out'])
-          PY
-          mkdir -p game
-          # aria2c gives up on a 530 (the tunnel has no connection to the PC: its Wi-Fi dropped, a sleep), so each file is tried
-          # again for up to 30 minutes of such outages; --continue keeps what arrived, and the next try asks only for the rest
-          while IFS=$'\t' read -r url out; do
-            echo "downloading: $out"
-            for attempt in $(seq 1 60); do
-              if aria2c --console-log-level=warn --summary-interval=60 --max-tries=30 --retry-wait=10 \
-                   --connect-timeout=30 --continue --file-allocation=none \
-                   --max-connection-per-server=8 --split=8 --min-split-size=50M \
-                   -d game -o "$out" "$url" < /dev/null; then break; fi
-              [ "$attempt" = 60 ] && { echo "::error::$out: the feeder stayed unreachable for 30 minutes"; exit 1; }
-              echo "::warning::$out: the feeder is unreachable (try $attempt); trying again in 30 s, resuming what arrived"
-              sleep 30
-            done
-            echo "download complete: $out"
-          done < dl.tsv
+          echo "GAME_RELEASE_FOUND=${rel_id:+1}" >> "$GITHUB_ENV"
           ls -lh game
           # The feeder on your PC can be stopped (Ctrl+C) from here on.
           echo "ALL DOWNLOADS COMPLETE"
+
+      - name: Save the game files to a draft release, so later builds skip the feeder
+        if: inputs.game_release != '' && env.GAME_RELEASE_FOUND != '1'
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GAME_RELEASE: ${{ inputs.game_release }}
+        run: |
+          set -e
+          # The game files only, never prod.keys; parts under GitHub's 2 GB per file, and the SHA-256 of each whole file.
+          # A draft: only the fork's writers see it. Publishing it would make the game public, so it is never published
+          mkdir -p save
+          (cd game && for f in *; do [ "$f" = prod.keys ] && continue; shasum -a 256 "$f"; done) > save/game.sha256
+          python3 -c "import json; m = json.load(open('manifest.json')); print(json.dumps({'game': m['game']}))" > save/game.json
+          for f in game/*; do
+            n=$(basename "$f"); [ "$n" = prod.keys ] && continue
+            split -d -b 1900m "$f" "save/$n.part-"
+          done
+          ls -lh save
+          gh release create "$GAME_RELEASE" --draft --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Game files: $GAME_RELEASE (private draft, do not publish)" \
+            --notes "Game files saved by run $GITHUB_RUN_NUMBER for later builds (build-ipa.yml game_release). A draft: only the fork's writers can see it. Do not publish it." \
+            save/*
+          rm -rf save
+          echo "saved the game files to the draft release $GAME_RELEASE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build the app and the IPA
         run: |
