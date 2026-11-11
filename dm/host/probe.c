@@ -398,6 +398,8 @@ void probe_atrace(uint64_t lo, uint64_t n) {
     int r = mprotect((void *)(uintptr_t)lo, n, PROT_NONE);
     LOG("DM_CTL: atrace range %d %#llx + %#llx armed%s", i, (unsigned long long)lo, (unsigned long long)n, r ? " (mprotect failed)" : "");
 }
+#else
+void probe_atrace(uint64_t lo, uint64_t n) { (void)lo; (void)n; LOG("DM_CTL: atrace is not available on iPhone (the probes are Mac-only)"); }
 #endif
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
