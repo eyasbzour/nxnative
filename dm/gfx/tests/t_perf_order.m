@@ -231,7 +231,8 @@ static void wait_budgets(void) {
             CHECK("only the virtual event advances time", test_budget.now == 1999750000 + (fast ? c->elapsed : 0));
             int fallback = fast ? c->fallback : 1;
             uint64_t remaining = fast ? c->remaining : (c->timeout > hour ? hour : c->timeout);
-            CHECK("feedback wait count", test_budget.cond_calls == fallback);
+            // an unbounded wait first waits 10 s to report a hang (nvn_mtl.m mtl_wait_at), then the rest of its hour
+            CHECK("feedback wait count", test_budget.cond_calls == fallback * (c->timeout == UINT64_MAX ? 2 : 1));
             CHECK("feedback absolute deadline has only remaining budget", !fallback
                 || test_budget.cond_remaining == (int64_t)remaining);
         }
