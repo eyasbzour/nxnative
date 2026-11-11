@@ -5,7 +5,8 @@
 # running on your Windows PC. With game_release set, the first run also saves
 # them (never prod.keys) to a draft release of that tag, which only the fork's
 # writers can see, and later runs with the same game_release take them from
-# there, without the feeder. prod.keys comes from the PROD_KEYS secret (base64
+# there, without the feeder. upload_game.py (in the Windows kit) fills such a
+# release from your PC instead, resuming after an interruption. prod.keys comes from the PROD_KEYS secret (base64
 # of the file) when it is set, else from the feeder. Never publish a game_release.
 # When the build finishes, the IPA goes up as release parts (each under 2 GB).
 #
@@ -119,19 +120,34 @@ jobs:
           fi
           if [ -n "$rel_id" ]; then
             echo "game files from the draft release $GAME_RELEASE (no feeder needed)"
+            # The release's layout (the save step below and upload_game.py on your PC write it): game.json names each file
+            # ({"game": base name, "files": [{"id", "name", "size", "sha256"}]}) and its pieces are <id>.part-NNN, as GitHub
+            # renames release files whose names hold spaces or brackets. game.json goes up last: without it the upload is unfinished
             mkdir -p parts
-            gh api "repos/$GITHUB_REPOSITORY/releases/$rel_id/assets?per_page=100" --paginate --jq '.[] | "\(.id)\t\(.name)"' > assets.tsv
+            gh api "repos/$GITHUB_REPOSITORY/releases/$rel_id/assets?per_page=100" --paginate --jq '.[] | select(.state == "uploaded") | "\(.id)\t\(.name)"' > assets.tsv
+            grep -q $'\tgame.json$' assets.tsv || { echo "::error::the draft release $GAME_RELEASE has no game.json: its upload is unfinished (run upload_game.py again) or it is not a game release"; exit 1; }
             while IFS=$'\t' read -r id name; do
-              echo "downloading part: $name"
-              gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "parts/$name" < /dev/null
+              echo "downloading piece: $name"
+              for attempt in 1 2 3 4 5; do
+                gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "parts/$name" < /dev/null && break
+                [ "$attempt" = 5 ] && { echo "::error::$name: the download failed 5 times"; exit 1; }
+                sleep 20
+              done
             done < assets.tsv
-            # parts/<file>.part-NN back into game/<file>, then each checked against the SHA-256 the saving run recorded
-            for first in parts/*.part-00; do
-              f=$(basename "$first" .part-00)
-              cat "parts/$f".part-* > "game/$f"
-            done
-            (cd game && shasum -a 256 -c ../parts/game.sha256)
-            cp parts/game.json manifest.json
+            python3 - <<'PY'
+          import hashlib, json, pathlib
+          parts = pathlib.Path('parts'); index = json.loads((parts / 'game.json').read_text())
+          for f in index['files']:
+              pieces = sorted(parts.glob(f['id'] + '.part-*'))
+              h = hashlib.sha256(); size = 0
+              with open(pathlib.Path('game') / f['name'], 'wb') as out:
+                  for piece in pieces:
+                      data = piece.read_bytes(); h.update(data); size += len(data); out.write(data); piece.unlink()
+              if size != f['size'] or h.hexdigest() != f['sha256']:
+                  raise SystemExit(f"{f['name']}: {len(pieces)} pieces make {size} bytes with SHA-256 {h.hexdigest()}, not the {f['size']} bytes and {f['sha256']} recorded: the release is incomplete or damaged")
+              print(f"{f['name']}: {size} bytes, SHA-256 matches")
+          json.dump({'game': index['game']}, open('manifest.json', 'w'))
+          PY
             rm -rf parts
           else
             [ -n "$MANIFEST_URL" ] || { echo "::error::no draft release $GAME_RELEASE and no manifest_url: run serve_game.ps1 and give its manifest URL"; exit 1; }
@@ -188,20 +204,27 @@ jobs:
           GAME_RELEASE: ${{ inputs.game_release }}
         run: |
           set -e
-          # The game files only, never prod.keys; parts under GitHub's 2 GB per file, and the SHA-256 of each whole file.
-          # A draft: only the fork's writers see it. Publishing it would make the game public, so it is never published
+          # The game files only, never prod.keys, in the layout the fetch step reads (pieces <id>.part-NNN under GitHub's 2 GB
+          # per file, and game.json). A draft: only the fork's writers see it. Publishing it would make the game public
           mkdir -p save
-          (cd game && for f in *; do [ "$f" = prod.keys ] && continue; shasum -a 256 "$f"; done) > save/game.sha256
-          python3 -c "import json; m = json.load(open('manifest.json')); print(json.dumps({'game': m['game']}))" > save/game.json
-          for f in game/*; do
-            n=$(basename "$f"); [ "$n" = prod.keys ] && continue
-            split -d -b 1900m "$f" "save/$n.part-"
-          done
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          files = sorted(p for p in pathlib.Path('game').iterdir() if p.name != 'prod.keys')
+          index = {'game': json.load(open('manifest.json'))['game'], 'files': []}
+          for i, p in enumerate(files, 1):
+              h = hashlib.sha256(); size = 0
+              with open(p, 'rb') as f:
+                  for n, data in enumerate(iter(lambda: f.read(1900 * 2**20), b'')):
+                      h.update(data); size += len(data); (pathlib.Path('save') / f'f{i}.part-{n:03d}').write_bytes(data)
+              index['files'].append({'id': f'f{i}', 'name': p.name, 'size': size, 'sha256': h.hexdigest()})
+          pathlib.Path('save/game.json').write_text(json.dumps(index, indent=1) + '\n')
+          PY
           ls -lh save
           gh release create "$GAME_RELEASE" --draft --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Game files: $GAME_RELEASE (private draft, do not publish)" \
             --notes "Game files saved by run $GITHUB_RUN_NUMBER for later builds (build-ipa.yml game_release). A draft: only the fork's writers can see it. Do not publish it." \
-            save/*
+            save/f*.part-*
+          gh release upload "$GAME_RELEASE" --repo "$GITHUB_REPOSITORY" save/game.json   # last, as the fetch step takes a release once it is there
           rm -rf save
           echo "saved the game files to the draft release $GAME_RELEASE" >> "$GITHUB_STEP_SUMMARY"
 
