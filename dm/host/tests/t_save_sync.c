@@ -339,7 +339,7 @@ int main(void) {
     set_mtime(p, time(NULL) - 100);
     CHECK(session(R1, cloud4, "game.dat", "r3-more-progress") == 0 && cloud_has(cf4, root, "game.dat", "r3-more-progress"), "then the Mac saves more and sends it");
     snprintf(p, sizeof p, "%s/game.dat", R2); put(p, "new"); set_mtime(p, time(NULL) + 45);
-    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && strstr(line, "cdevice=Mac"),
+    CHECK(REPORT(R2, cloud4) && strstr(line, "conflict=1") && strstr(line, "cfiles=1 ") && !strstr(line, "cdevice=- "),   // the model name: Mac14,2 on a Mac, VirtualMac2,1 on a CI runner
           "both changed: the report says conflict, with the cloud's device (%s)", line);
     {   // the incident of the PR: the new game's save is the newer by date, so the player needs the sizes to tell them apart
         char *cs = strstr(line, "csaved="), *sv = strstr(line, " saved=");
