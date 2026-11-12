@@ -279,11 +279,9 @@ static int net_wait(net_ref *r, short events, int64_t timeout, uint64_t start) {
 }
 int dm_net_socket(int family, int type, int protocol) {
     if (!net_gate()) return -1;
-    if (family != 2) return net_error(97);
     unsigned flags = (unsigned)type & ~0xfu; int base = type & 0xf;
-    if (flags & ~0x20000000u) return net_error(22);
-    if (base != 1 && base != 2) return net_error(94);
-    if (protocol && protocol != (base == 1 ? 6 : 17)) return net_error(93);
+    int refused = family != 2 ? 97 : flags & ~0x20000000u ? 22 : base != 1 && base != 2 ? 94 : protocol && protocol != (base == 1 ? 6 : 17) ? 93 : 0;
+    if (refused) { int result = net_error(refused); fprintf(stderr, "net: socket refused (family %d, type %#x, protocol %d) errno=%d\n", family, type, protocol, refused); return result; }
     int fd = socket(AF_INET, base == 1 ? SOCK_STREAM : SOCK_DGRAM, protocol), err = errno;
     int result = fd < 0 ? net_error(net_errno(err)) : net_register(fd, base, !!flags);
     net_trace("socket", result, result); return result;
