@@ -15,6 +15,21 @@ int dm_account_uid_exists(const void *uid) { return uid && !memcmp(uid, &k_uid, 
 int dm_account_copy_uid(void *output) { if (!output) return 0; memcpy(output, &k_uid, sizeof k_uid); return 1; }
 #define HANDLE_MAGIC 0x55534552484e444cull                                    // "USERHNDL"
 static int online_user(const UserHandle *h) { return h && h->v[2] == HANDLE_MAGIC && h->v[0] == k_uid.v[0] && h->v[1] == k_uid.v[1]; }
+// In Nextendo mode each online account call's answer is logged the first time it is given (the call, its result, and what the availability check said; never the
+// token or the account), so a device log shows which step of a game's sign-in stopped. value: -1 none, 0 / 1 not available / available, -2 not the local user's handle
+enum { ACC_NONE = -1, ACC_NOT_LOCAL = -2 };
+static Result acc_note(const char *call, Result r, int value) {
+    if (!dm_net_nextendo_enabled()) return r;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; static struct { const char *call; Result r; int value; } seen[64]; static unsigned count;
+    pthread_mutex_lock(&lock); int fresh = 1;
+    for (unsigned i = 0; i < count; i++) if (seen[i].call == call && seen[i].r == r && seen[i].value == value) fresh = 0;
+    if (fresh && count < 64) { seen[count].call = call; seen[count].r = r; seen[count].value = value; count++; }
+    pthread_mutex_unlock(&lock);
+    if (fresh) LOG("%saccount: %s -> 0x%x%s", r ? "[RED] " : "", call, r,
+                   value == ACC_NOT_LOCAL ? " (not the local user's handle)" : value == 1 ? " (available)" : value == 0 ? " (not available)" : "");
+    return r;
+}
+#define ACC_USER(h) (online_user(h) ? ACC_NONE : ACC_NOT_LOCAL)
 
 HLE_FORCE("_ZN2nn7account10InitializeEv", "connects to the acc:u0 account service; the host has one fixed local user", void, h_acc_Init, void) {}
 
@@ -62,15 +77,15 @@ HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickna
 }
 
 // ---------- Online accounts: cut ----------
-HLE_FORCE_WAIT("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "network service account requires the user's actual unexpired Nextendo NEX proof", Result, h_acc_EnsureNsa, const UserHandle *h) { return online_user(h) ? dm_nextendo_account_ensure() : RES_FAIL; }
-HLE_FORCE_WAIT("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", "real provider PID or required server-reported BAAS identity", Result, h_acc_GetNsaId, uint64_t *id, const UserHandle *h) { if (id) *id = 0; return online_user(h) ? dm_nextendo_account_id(id) : RES_FAIL; }
+HLE_FORCE_WAIT("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", "network service account requires the user's actual unexpired Nextendo NEX proof", Result, h_acc_EnsureNsa, const UserHandle *h) { return acc_note("EnsureNetworkServiceAccountAvailable", online_user(h) ? dm_nextendo_account_ensure() : RES_FAIL, ACC_USER(h)); }
+HLE_FORCE_WAIT("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", "real provider PID or required server-reported BAAS identity", Result, h_acc_GetNsaId, uint64_t *id, const UserHandle *h) { if (id) *id = 0; return acc_note("GetNetworkServiceAccountId", online_user(h) ? dm_nextendo_account_id(id) : RES_FAIL, ACC_USER(h)); }
 HLE_FORCE_WAIT("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", "real NEX proof in the native game's cached account token", Result, h_acc_LoadTok, uint64_t *n, char *buf, uint64_t sz, const UserHandle *h) {
-    if (n) *n = 0; return online_user(h) ? dm_nextendo_account_load_token(n, buf, sz) : RES_FAIL;
+    if (n) *n = 0; return acc_note("LoadNetworkServiceAccountIdTokenCache", online_user(h) ? dm_nextendo_account_load_token(n, buf, sz) : RES_FAIL, ACC_USER(h));
 }
-HLE_FORCE("_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10UserHandleE", "online membership notice applet, out of scope; cut", Result, h_acc_ShowLic, const UserHandle *h) { (void)h; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10UserHandleE", "online membership notice applet, out of scope; cut", Result, h_acc_ShowLic, const UserHandle *h) { (void)h; return acc_note("ShowLicenseRequirementsForNetworkService", RES_FAIL, ACC_NONE); }
 // The Nintendo Account's cached profile (birthday, country): no Nintendo Account is linked on the host, so loading fails and the game skips its getters (Big Brain Academy: Brain vs. Brain, main+0xab8bc)
 HLE_FORCE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "cached Nintendo Account info: none linked, fails", Result, h_acc_LoadNaInfo,
-          void *info, const UserHandle *h, void *buf, uint64_t sz) { (void)info; (void)h; (void)buf; (void)sz; return RES_FAIL; }
+          void *info, const UserHandle *h, void *buf, uint64_t sz) { (void)info; (void)h; (void)buf; (void)sz; return acc_note("LoadCachedNintendoAccountInfo", RES_FAIL, ACC_NONE); }
 
 // AsyncContext / NintendoAccountAuthorizationRequestContext.
 // AsyncContext is built by the SDK's own constructor, which is not taken over: it writes the class's vtable and nulls the IPC object pointer at +0x18, and sends
@@ -81,19 +96,19 @@ HLE_FORCE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAc
 // With Nextendo on (dm_net_nextendo_enabled), the request state (hle_nextendo_apple.m) is created when a request starts (dm_nextendo_async_execute). With it off,
 // no request ever starts, and a context answers as the offline host always has: the completion event fires immediately, it is done, and the result is failure.
 // NintendoAccountAuthorizationRequestContext has no vtable: its constructor writes no memory, and its contents are read and written only by the interfaces below.
-HLE_FORCE_WAIT("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", "cache the real Nextendo NEX game token and publish its actual completion result; offline, cut", Result, h_acc_EnsureTokAsync, void *ctx, const UserHandle *h) { return online_user(h) ? dm_nextendo_async_ensure(ctx) : RES_FAIL; }
+HLE_FORCE_WAIT("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_12AsyncContextERKNS0_10UserHandleE", "cache the real Nextendo NEX game token and publish its actual completion result; offline, cut", Result, h_acc_EnsureTokAsync, void *ctx, const UserHandle *h) { return acc_note("EnsureNetworkServiceAccountIdTokenCacheAsync", online_user(h) ? dm_nextendo_async_ensure(ctx) : RES_FAIL, ACC_USER(h)); }
 HLE_FORCE("_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", "account completion event with a checked kernel-event lifetime; Nextendo off, it fires immediately", Result, h_acc_AcGetEv, void *self, void *ev) {
     if (!dm_net_nextendo_enabled()) { hle_signal_system_event(ev); return RES_OK; }
     uint64_t lifetime = dm_nextendo_async_lifetime(self); if (!ev || !lifetime) return RES_FAIL;
     hle_bind_system_event(ev, 0); return dm_nextendo_async_attach(self, lifetime, hle_system_event_binding(ev));
 }
 // Nextendo off, no request has started, and dm_nextendo_async_result returns DM_ACCOUNT_FAIL, RES_FAIL's value (nextendo_account.h)
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext9GetResultEv", "actual completed account request result; Nextendo off, failure", Result, h_acc_AcGetRes, void *self) { return dm_nextendo_async_result(self); }
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext9GetResultEv", "actual completed account request result; Nextendo off, failure", Result, h_acc_AcGetRes, void *self) { return acc_note("AsyncContext::GetResult", dm_nextendo_async_result(self), ACC_NONE); }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContextC1Ev", "Nintendo Account authorization, out of scope; the constructor writes no memory", void, h_acc_NaCtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContextD1Ev", "Nintendo Account authorization, out of scope", void, h_acc_NaDtor, void *self) { (void)self; }
 HLE_FORCE("_ZN2nn7account41CreateNintendoAccountAuthorizationRequestEPNS0_42NintendoAccountAuthorizationRequestContextERKNS0_10UserHandleERKNS0_45NintendoAccountAuthorizationRequestParametersEPvm",
           "Nintendo Account authorization, out of scope; cut", Result, h_acc_NaCreate, void *ctx, const UserHandle *h, const void *prm, void *buf, uint64_t sz) {
-    (void)ctx; (void)h; (void)prm; (void)buf; (void)sz; return RES_FAIL;
+    (void)ctx; (void)h; (void)prm; (void)buf; (void)sz; return acc_note("CreateNintendoAccountAuthorizationRequest", RES_FAIL, ACC_NONE);
 }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContext14GetSystemEventEPNS_2os11SystemEventE", "authorization completion event; fires immediately", Result, h_acc_NaGetEv, void *self, void *ev) { (void)self; hle_signal_system_event(ev); return RES_OK; }
 HLE_FORCE("_ZN2nn7account42NintendoAccountAuthorizationRequestContext34GetResultWithInteractionIfRequiredEv", "authorization result; always fails", Result, h_acc_NaGetRes, void *self) { (void)self; return RES_FAIL; }
@@ -148,7 +163,8 @@ HLE_FORCE("_ZN2nn7account27StoreSaveDataThumbnailImageERKNS0_3UidEPKvm", "save-d
 HLE_FORCE("_ZN2nn7account28DeleteSaveDataThumbnailImageERKNS0_3UidE", "save-data thumbnail; the host keeps none", Result, h_acc_DeleteThumb, const Uid *uid) { (void)uid; return RES_OK; }
 HLE_FORCE_WAIT("_ZN2nn7account32IsNetworkServiceAccountAvailableEPbRKNS0_10UserHandleE", "only a coherent unexpired Nextendo NEX credential enables the local user's NSA", Result, h_acc_NsaAvail, uint8_t *out, const UserHandle *h) {
     if (!out) return RES_FAIL; *out = 0;
-    return online_user(h) ? dm_nextendo_account_available(out) : RES_FAIL;
+    Result r = online_user(h) ? dm_nextendo_account_available(out) : RES_FAIL;
+    return acc_note("IsNetworkServiceAccountAvailable", r, online_user(h) ? *out != 0 : ACC_NOT_LOCAL);
 }
 HLE_FORCE("_ZN2nn7account9CloseUserERKNS0_10UserHandleE", "close user; the handle holds no session", void, h_acc_CloseUser, const UserHandle *h) { (void)h; }
 // Nextendo off (see AsyncContext above), a context has nothing to cancel and is done
@@ -159,7 +175,7 @@ HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextD1Ev", "destroy owned account reques
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextaSEOS1_", "move account request state and its event lifetimes", void *, h_acc_AcMove, void *self, void *other) { return dm_nextendo_async_move(self, other); }
 
 // Additional SDK service overloads use the same provider and object lifetime.
-HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContext9GetResultEv", "actual completed account request result, SDK 19 const overload", Result, h_acc_AcGetResConst, void *self) { return dm_nextendo_async_result(self); }
+HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContext9GetResultEv", "actual completed account request result, SDK 19 const overload", Result, h_acc_AcGetResConst, void *self) { return acc_note("AsyncContext::GetResult", dm_nextendo_async_result(self), ACC_NONE); }
 HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContext7HasDoneEPb", "actual account request completion, SDK 19 const overload; Nextendo off, done", Result, h_acc_AcHasDoneConst, void *self, uint8_t *done) { return acc_done(self, done); }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextD2Ev", "destroy owned account request state", void, h_acc_AcDtor2, void *self) { dm_nextendo_async_destroy(self); }
 HLE_FORCE("_ZN2nn7account12AsyncContextD0Ev", "destroy account request state and release its guest allocation", void, h_acc_AcDeletingDtor, void *self) {
