@@ -83,9 +83,48 @@ HLE_FORCE_WAIT("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0
     if (n) *n = 0; return acc_note("LoadNetworkServiceAccountIdTokenCache", online_user(h) ? dm_nextendo_account_load_token(n, buf, sz) : RES_FAIL, ACC_USER(h));
 }
 HLE_FORCE("_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10UserHandleE", "online membership notice applet, out of scope; cut", Result, h_acc_ShowLic, const UserHandle *h) { (void)h; return acc_note("ShowLicenseRequirementsForNetworkService", RES_FAIL, ACC_NONE); }
-// The Nintendo Account's cached profile (birthday, country): no Nintendo Account is linked on the host, so loading fails and the game skips its getters (Big Brain Academy: Brain vs. Brain, main+0xab8bc)
-HLE_FORCE("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "cached Nintendo Account info: none linked, fails", Result, h_acc_LoadNaInfo,
-          void *info, const UserHandle *h, void *buf, uint64_t sz) { (void)info; (void)h; (void)buf; (void)sz; return acc_note("LoadCachedNintendoAccountInfo", RES_FAIL, ACC_NONE); }
+// The Nintendo Account's cached profile (birthday, country). Offline no Nintendo Account is linked, so loading fails and the game skips its getters (Big Brain Academy:
+// Brain vs. Brain, main+0xab8bc). In Nextendo mode, with the account signed in, it loads, as Ryujinx-Nextendo and Mush8 answer the account service's 0x68-byte NasUserBase
+// (birthday at 0, country at 0x20) that the SDK copies into this object. The host never writes the object, whose layout in a given SDK is unchecked: it takes over the
+// object's four getters, which return a string and its length. Country: the Nextendo account's (dm_nextendo_account_country), else the device's region (DM_NEXTENDO_COUNTRY,
+// which the launcher sets), else none. Birthday: the launcher's picker (DM_NEXTENDO_BIRTHDAY, YYYY-MM-DD), else 2000-01-01, the date both of those clients send. Gender and region: none
+static char na_country[3], na_birthday[11] = "2000-01-01";   // set by a successful load, before the game reads the getters
+static int na_country_ok(const char *c) { return c && c[0] >= 'A' && c[0] <= 'Z' && c[1] >= 'A' && c[1] <= 'Z' && !c[2]; }
+static int na_birthday_ok(const char *b) {
+    if (!b || strlen(b) != 10 || b[4] != '-' || b[7] != '-') return 0;
+    for (int i = 0; i < 10; i++) if (i != 4 && i != 7 && (b[i] < '0' || b[i] > '9')) return 0;
+    int month = (b[5] - '0') * 10 + b[6] - '0', day = (b[8] - '0') * 10 + b[9] - '0'; return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+HLE_FORCE_WAIT("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "cached Nintendo Account info: the Nextendo account's country and the launcher's birthday; offline none linked, fails", Result, h_acc_LoadNaInfo,
+          void *info, const UserHandle *h, void *buf, uint64_t sz) {
+    (void)info; if (buf && sz) memset(buf, 0, sz);
+    uint8_t available = 0; Result r = online_user(h) ? dm_nextendo_account_available(&available) : RES_FAIL; if (!r && !available) r = RES_FAIL;
+    if (!r) {
+        char country[3] = {0}; if (dm_nextendo_account_country(country) || !na_country_ok(country)) country[0] = 0;
+        const char *device = getenv("DM_NEXTENDO_COUNTRY"); if (!country[0] && na_country_ok(device)) memcpy(country, device, 3);
+        const char *birthday = getenv("DM_NEXTENDO_BIRTHDAY");
+        memcpy(na_country, country, 3); memcpy(na_birthday, na_birthday_ok(birthday) ? birthday : "2000-01-01", 11);
+        static int told; if (!told++) LOG("account: Nintendo Account info: country %s, birthday %s", na_country[0] ? "set" : "none", na_birthday_ok(birthday) ? "from the launcher" : "2000-01-01");
+    }
+    return acc_note("LoadCachedNintendoAccountInfo", r, online_user(h) ? ACC_NONE : ACC_NOT_LOCAL);
+}
+static const char *na_string(const char *s, uint64_t *n) { if (n) *n = strlen(s); return s; }
+HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo10GetCountryEPm", "the loaded Nintendo Account country (two letters, or none)", const char *, h_acc_NaCountry, const void *self, uint64_t *n) { (void)self; return na_string(na_country, n); }
+HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo11GetBirthdayEPm", "the loaded Nintendo Account birthday, YYYY-MM-DD", const char *, h_acc_NaBirthday, const void *self, uint64_t *n) { (void)self; return na_string(na_birthday, n); }
+HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo9GetGenderEPm", "Nintendo Account gender: none", const char *, h_acc_NaGender, const void *self, uint64_t *n) { (void)self; return na_string("", n); }
+HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo9GetRegionEPm", "Nintendo Account region: none", const char *, h_acc_NaRegion, const void *self, uint64_t *n) { (void)self; return na_string("", n); }
+
+// Online membership (NetworkServiceLicenseKind: 0 none, 1 subscribed). Ryujinx-Nextendo (LoadNetworkServiceLicenseKindAsync) and Mush8 (IManagerForApplication 170)
+// answer subscribed once the id-token request completes; the request here is the same one (dm_nextendo_async_ensure), and the kind is subscribed only when it succeeded.
+// AsyncNetworkServiceLicenseInfoContext derives from AsyncContext (it has no getters of its own but this one): its SDK constructor runs, and the AsyncContext takeovers
+// below serve its event, completion and result. Its own move operations and deleting destructor stay the SDK's, as its fields past the AsyncContext are unchecked: if they
+// do not go through AsyncContext's (taken over), the request state stays with the old object and the kind reads none, which the log shows
+HLE_FORCE_WAIT("_ZN2nn7account34LoadNetworkServiceLicenseInfoAsyncEPNS0_37AsyncNetworkServiceLicenseInfoContextERKNS0_10UserHandleE", "online membership: the id-token request; subscribed when it succeeds; offline, cut", Result, h_acc_LicenseAsync,
+               void *ctx, const UserHandle *h) { return acc_note("LoadNetworkServiceLicenseInfoAsync", online_user(h) ? dm_nextendo_async_ensure(ctx) : RES_FAIL, ACC_USER(h)); }
+HLE_FORCE_WAIT("_ZN2nn7account37AsyncNetworkServiceLicenseInfoContext28GetNetworkServiceLicenseKindEv", "subscribed only after a successful Nextendo request", uint32_t, h_acc_LicenseKind, void *self) {
+    uint32_t kind = dm_net_nextendo_enabled() && dm_nextendo_async_result(self) == 0 ? 1 : 0;
+    acc_note("GetNetworkServiceLicenseKind", kind ? RES_OK : RES_FAIL, ACC_NONE); return kind;
+}
 
 // AsyncContext / NintendoAccountAuthorizationRequestContext.
 // AsyncContext is built by the SDK's own constructor, which is not taken over: it writes the class's vtable and nulls the IPC object pointer at +0x18, and sends
@@ -190,5 +229,4 @@ static void acc_move_construct(void *self, void *other) {
 }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC1EOS1_", "move-construct: the SDK's vtable and request state", void, h_acc_AcMoveCtor, void *self, void *other) { acc_move_construct(self, other); }
 HLE_FORCE_WAIT("_ZN2nn7account12AsyncContextC2EOS1_", "move-construct: the SDK's vtable and request state", void, h_acc_AcMoveCtor2, void *self, void *other) { acc_move_construct(self, other); }
-HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext4SwapERS1_", "swap owned account request state", void, h_acc_AcSwap, void *self, void *other) { dm_nextendo_async_swap(self, other); }
-HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContextcvbEv", "whether an account request owns an actual operation", unsigned, h_acc_AcValid, void *self) { return dm_nextendo_async_valid(self); }
+HLE_FORCE_WAIT("_ZN2nn7account12AsyncContext4SwapERS1_", "swap owned account request state", void, h_acc_AcSwap, void *self, void *other) { dm_nextendo_async_swap(self, other); }HLE_FORCE_WAIT("_ZNK2nn7account12AsyncContextcvbEv", "whether an account request owns an actual operation", unsigned, h_acc_AcValid, void *self) { return dm_nextendo_async_valid(self); }

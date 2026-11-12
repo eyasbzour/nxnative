@@ -61,11 +61,25 @@ private struct CloudSavesSection: View {
     }
 }
 
+/// The birthday a game reads from the Nintendo Account info in Nextendo mode (hle_account.c, DM_NEXTENDO_BIRTHDAY): Nextendo does not give one, and iOS does not give
+/// apps the owner's. Kept under its own key as YYYY-MM-DD; 2000-01-01 (what Ryujinx-Nextendo and Mush8 send) until the player picks one
+private let nextendoBirthdayKey = "nextendo.birthday"
+private let nextendoBirthdayDefault = "2000-01-01"
+private let nextendoBirthdayFormat: DateFormatter = {
+    let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.calendar = Calendar(identifier: .gregorian)
+    f.timeZone = TimeZone(identifier: "UTC"); f.dateFormat = "yyyy-MM-dd"; return f
+}()
+
 /// Nextendo: the account a game in Nextendo mode plays online with (NextendoSignIn.m). Only in an app built with --nextendo.
 private struct NextendoSection: View {
     @State private var account: String? = nil
     @State private var note = ""
     @State private var busy = false
+    @AppStorage(nextendoBirthdayKey) private var birthday = nextendoBirthdayDefault
+    private var birthdayDate: Binding<Date> {
+        Binding(get: { nextendoBirthdayFormat.date(from: birthday) ?? nextendoBirthdayFormat.date(from: nextendoBirthdayDefault)! },
+                set: { birthday = nextendoBirthdayFormat.string(from: $0) })
+    }
 
     var body: some View {
         Section {
@@ -75,6 +89,7 @@ private struct NextendoSection: View {
                 Text(busy ? "Checking…" : account ?? "Not signed in").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             if dm_nextendo_signed_in() {
+                DatePicker("Birthday", selection: birthdayDate, in: ...Date(), displayedComponents: .date)
                 Button("Sign out", role: .destructive) { dm_nextendo_sign_out(); account = nil; note = "" }.disabled(busy)
             } else {
                 Button("Sign in…") {
@@ -292,7 +307,20 @@ private struct LauncherView: View {
         asking = nil
         if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
         applyVpn()
+        applyNextendoProfile()
         play()
+    }
+
+    /// The birthday picked under the Nextendo account and the device's region, for the Nintendo Account info a game reads online (hle_account.c: the Nextendo
+    /// account's own country comes first). What an env file or the launch set stays
+    private func applyNextendoProfile() {
+        guard dm_nextendo_built() else { return }
+        if getenv("DM_NEXTENDO_BIRTHDAY") == nil, let b = UserDefaults.standard.string(forKey: nextendoBirthdayKey), nextendoBirthdayFormat.date(from: b) != nil {
+            setenv("DM_NEXTENDO_BIRTHDAY", b, 1); fputs("launcher: DM_NEXTENDO_BIRTHDAY set\n", stderr)
+        }
+        if getenv("DM_NEXTENDO_COUNTRY") == nil, let region = Locale.current.region?.identifier, region.count == 2, region.allSatisfy({ $0.isASCII && $0.isUppercase }) {
+            setenv("DM_NEXTENDO_COUNTRY", region, 1); fputs("launcher: DM_NEXTENDO_COUNTRY=\(region)\n", stderr)
+        }
     }
 
     /// VPN play's two variables, while Network is LAN or Local wireless (VpnSection); what an env file or the launch set stays

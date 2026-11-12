@@ -89,8 +89,10 @@ static void token_tests(void) {
     if (!headerBytes || !claimBytes) return;
     NSDictionary *header = [NSJSONSerialization JSONObjectWithData:headerBytes options:0 error:nil], *claims = [NSJSONSerialization JSONObjectWithData:claimBytes options:0 error:nil];
     NSDictionary *original = [NSJSONSerialization JSONObjectWithData:fixture options:0 error:nil];
-    CHECK([header[@"alg"] isEqual:@"RS256"] && [claims[@"iss"] isEqual:@"nx-port-studio"] && [claims[@"sub"] isEqual:@"1800000042"] && [claims[@"nnex"] isEqual:original[@"token"]] && [claims[@"tv"] isEqual:@"3.0.5"], "own namespace, actual PID, untouched NEX proof and original game version");
-    CHECK(!claims[@"aud"] && !claims[@"jku"] && !claims[@"hm"] && !claims[@"sn"] && !claims[@"country"] && [claims[@"exp"] doubleValue] <= [original[@"expires_at"] doubleValue], "no invented Nintendo identity, membership or country; expiry bounded by the proof");
+    CHECK([header[@"alg"] isEqual:@"RS256"] && [header[@"typ"] isEqual:@"id_token"] && [header[@"kid"] isEqual:@"nextendo-baas-key-1"] && [claims[@"nnex"] isEqual:original[@"token"]] && [claims[@"tv"] isEqual:@"3.0.5"], "Nextendo clients' BaaS header, untouched NEX proof and original game version");
+    CHECK([claims[@"iss"] isEqual:@"https://e0d67c509fb203858ebcb2fe3f88c2aa.baas.nintendo.com"] && [claims[@"aud"] isEqual:@"ed9e2f05d286f7b8"] && [claims[@"hm"] isEqual:@YES] && [claims[@"sub"] length] == 32 && [claims[@"bs:did"] length] == 32 && !claims[@"country"] && !claims[@"app_id"],
+          "the claims Ryujinx-Nextendo and Mush8 send (issuer, audience, membership, random IDs), no country and no app_id for this game");
+    CHECK([claims[@"exp"] doubleValue] <= [original[@"expires_at"] doubleValue] && [claims[@"nbf"] isEqual:claims[@"iat"]], "expiry bounded by the proof");
     uint8_t publicKeyBytes[1024]; uint64_t keySize = 0; CHECK(dm_nextendo_copy_public_signing_key(publicKeyBytes, sizeof publicKeyBytes, &keySize) == 0 && keySize, "only the ephemeral public key is exported for verification");
     NSData *keyData = [NSData dataWithBytes:publicKeyBytes length:(NSUInteger)keySize]; SecKeyRef key = SecKeyCreateWithData((__bridge CFDataRef)keyData, (__bridge CFDictionaryRef)@{(__bridge id)kSecAttrKeyType:(__bridge id)kSecAttrKeyTypeRSA, (__bridge id)kSecAttrKeyClass:(__bridge id)kSecAttrKeyClassPublic}, NULL);
     NSData *signedBytes = [[NSString stringWithFormat:@"%@.%@", segments[0], segments[1]] dataUsingEncoding:NSASCIIStringEncoding];
@@ -120,6 +122,8 @@ static void async_tests(void) {
     Worker work = {contextA, 99}; pthread_t thread = pending(&work);
     CHECK(dm_nextendo_async_done(contextA, &done) == 0 && !done && event(contextA, &completion) == 0 && !completion.signaled, "pending operation exposes an unsignaled real event binding");
     release_provider(thread); CHECK(work.result == 0 && completion.signaled && result(contextA) == 0, "success and completion event publish only after actual token creation");
+    typedef uint32_t (*Kind)(void *); Kind kind = H(Kind, "_ZN2nn7account37AsyncNetworkServiceLicenseInfoContext28GetNetworkServiceLicenseKindEv");
+    CHECK(kind(contextA) == 1 && kind(contextB) == 0, "membership reads subscribed only for a completed successful request");
     CHECK(H(Object, "_ZN2nn7account12AsyncContext6CancelEv")(contextA) == 0 && result(contextA) == 0, "cancel after completion does not rewrite a completed success");
     CHECK(contextA[0] == (char)0xa5 && contextB[0] == 0x5a, "SDK4/19 private object memory remains untouched"); close_event(&completion); dtor(contextA);
     ctor(contextA); work = (Worker){contextA,99}; thread = pending(&work); CHECK(event(contextA, &completion) == 0, "attach cancel completion event");

@@ -53,6 +53,27 @@ uint32_t dm_nextendo_api_baas_id(uint64_t *output) { @autoreleasepool {
     *output=value; return 0;
 } }
 
+// The Nextendo account's country, two capital letters from /api/me's account.country (the player picks it at sign-up), else "": never a guessed one.
+// Ryujinx-Nextendo (NextendoCountry.cs) answers CachedNintendoAccountInfo::GetCountry from the same field. Fetched once per signed-in account
+uint32_t dm_nextendo_account_country(char output[3]) { @autoreleasepool {
+    if (!output) return DM_ACCOUNT_FAIL; output[0]=0;
+    NSData *identity = dm_nextendo_api_identity();
+    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; static NSData *cached_identity; static char cached[3];
+    pthread_mutex_lock(&mutex); bool known = identity && [cached_identity isEqual:identity]; if (known) memcpy(output,cached,3); pthread_mutex_unlock(&mutex);
+    if (known) return 0;
+    uint8_t *buffer=malloc(API_MAX); if (!buffer) return DM_ACCOUNT_FAIL; size_t size=0;
+    uint32_t result=dm_nextendo_api_request("me",NULL,0,buffer,API_MAX,&size);
+    NSData *bytes=result?nil:[NSData dataWithBytes:buffer length:size]; free(buffer); if (result) return result;
+    id document=[NSJSONSerialization JSONObjectWithData:bytes options:0 error:nil];
+    id account=[document isKindOfClass:NSDictionary.class]?document[@"account"]:nil;
+    id field=[account isKindOfClass:NSDictionary.class]?account[@"country"]:nil;
+    NSString *country=[field isKindOfClass:NSString.class]?[field stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].uppercaseString:@"";
+    char code[3]={0};
+    if (country.length==2) { unichar a=[country characterAtIndex:0], b=[country characterAtIndex:1]; if (a>='A' && a<='Z' && b>='A' && b<='Z') { code[0]=(char)a; code[1]=(char)b; } }
+    if (identity && [identity isEqual:dm_nextendo_api_identity()]) { pthread_mutex_lock(&mutex); cached_identity=identity; memcpy(cached,code,3); pthread_mutex_unlock(&mutex); }
+    memcpy(output,code,3); return 0;
+} }
+
 @interface DmNextendoApiTransfer : NSObject <NSURLSessionDataDelegate, NSURLSessionTaskDelegate>
 @property(nonatomic) NSLock *lock;
 @property(nonatomic) NSMutableData *data;

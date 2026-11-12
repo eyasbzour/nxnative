@@ -17,6 +17,8 @@ uint32_t dm_nextendo_account_available(uint8_t *out);
 uint32_t dm_nextendo_account_id(uint64_t *out);
 uint32_t dm_nextendo_account_ensure(void);
 uint32_t dm_nextendo_account_load_token(uint64_t *size, char *buffer, uint64_t capacity);
+// The signed-in Nextendo account's country ("FR"), "" when it has none; a network request the first time (hle_nextendo_api_apple.m)
+uint32_t dm_nextendo_account_country(char output[3]);
 // Public PKCS#1 RSA key for verifying this process's local envelope signature.
 // This does not claim registration with Nintendo or a Nextendo JWKS service.
 uint32_t dm_nextendo_copy_public_signing_key(void *buffer, uint64_t capacity, uint64_t *size);
