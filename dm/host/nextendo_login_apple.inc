@@ -129,7 +129,7 @@ __attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSS
     id parsed = body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:nil] : nil;
     NSDictionary *json = [parsed isKindOfClass:NSDictionary.class] ? parsed : nil;
     if (response.statusCode == 200) {
-        if (!json) nxl_fail(error, @"Nextendo's answer was not JSON");
+        if (!json) nxl_fail(error, @"the answer from nextendo.network was not a JSON object");
         return json;
     }
     id code = json[@"error"];
@@ -151,14 +151,14 @@ __attribute__((unused)) static NSString *nxl_token(NSDictionary<NSString *, NSSt
     NSDictionary *answer = nxl_send(post, &why);
     if (!answer) {
         bool refreshing = [grant[@"grant_type"] isEqual:@"refresh_token"];
-        if (refreshing && [why isEqual:@"invalid_grant"]) { nxl_write_refresh(nil); why = @"the Nextendo sign-in has expired: sign in again"; }
+        if (refreshing && [why isEqual:@"invalid_grant"]) { nxl_write_refresh(nil); why = @"the saved sign-in is no longer accepted: sign in to Nextendo again"; }
         nxl_fail(error, why);
         return nil;
     }
     NSString *access = answer[@"access_token"], *refresh = answer[@"refresh_token"];
-    if (![access isKindOfClass:NSString.class] || access.length == 0) { nxl_fail(error, @"Nextendo sent no access token"); return nil; }
+    if (![access isKindOfClass:NSString.class] || access.length == 0) { nxl_fail(error, @"the token answer had no access_token"); return nil; }
     if ([refresh isKindOfClass:NSString.class] && refresh.length && !nxl_write_refresh(refresh)) {
-        nxl_fail(error, @"the new Nextendo sign-in could not be saved");
+        nxl_fail(error, @"the renewed refresh token could not be written");
         return nil;
     }
     return access;
@@ -168,19 +168,19 @@ __attribute__((unused)) static NSString *nxl_token(NSDictionary<NSString *, NSSt
 // ("<pid>.<username>.<expiry>"; a username may contain dots), so the two can never disagree
 __attribute__((unused)) static NSDictionary *nxl_record(NSString *token, NSTimeInterval now, NSString **error) {
     NSArray<NSString *> *segments = [token componentsSeparatedByString:@"."];
-    if (segments.count != 3 || ![segments[0] isEqual:@"nx2"]) { nxl_fail(error, @"Nextendo's game token is not an nx2 token"); return nil; }
+    if (segments.count != 3 || ![segments[0] isEqual:@"nx2"]) { nxl_fail(error, @"the game token is not in nx2 form"); return nil; }
     NSData *payload = nxl_unb64url(segments[1]);
     NSString *claims = payload ? [[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding] : nil;
     NSRange first = [claims rangeOfString:@"."], last = [claims rangeOfString:@"." options:NSBackwardsSearch];
-    if (!claims || first.location == NSNotFound || last.location <= first.location + 1) { nxl_fail(error, @"Nextendo's game token names no identity"); return nil; }
+    if (!claims || first.location == NSNotFound || last.location <= first.location + 1) { nxl_fail(error, @"the game token carries no player ID and name"); return nil; }
     NSString *pidText = [claims substringToIndex:first.location], *expiryText = [claims substringFromIndex:last.location + 1];
     NSString *username = [claims substringWithRange:NSMakeRange(first.location + 1, last.location - first.location - 1)];
     NSCharacterSet *notDigit = NSCharacterSet.decimalDigitCharacterSet.invertedSet;
     unsigned long long pid = strtoull(pidText.UTF8String, NULL, 10), expiry = strtoull(expiryText.UTF8String, NULL, 10);
     bool numeric = pidText.length && expiryText.length && pidText.length <= 20 && expiryText.length <= 20
                    && [pidText rangeOfCharacterFromSet:notDigit].location == NSNotFound && [expiryText rangeOfCharacterFromSet:notDigit].location == NSNotFound;
-    if (!numeric || pid == 0) { nxl_fail(error, @"Nextendo's game token names no identity"); return nil; }
-    if ((double)expiry <= now) { nxl_fail(error, @"Nextendo's game token has already expired"); return nil; }
+    if (!numeric || pid == 0) { nxl_fail(error, @"the game token carries no player ID and name"); return nil; }
+    if ((double)expiry <= now) { nxl_fail(error, @"the game token is past its expiry"); return nil; }
     return @{@"schema_version": @1, @"token_kind": @"nex", @"token": token,
              @"identity": @{@"pid": @(pid), @"username": username},
              @"created_at": @(floor(now)), @"expires_at": @(expiry),
@@ -207,7 +207,7 @@ __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
     if (!answer) return nil;
     NSString *token = answer[@"nex_token"];
     if (![token isKindOfClass:NSString.class] || token.length == 0) {
-        nxl_fail(error, @"Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account");
+        nxl_fail(error, @"Nextendo issued no game token for this account (Nextendo asks for a verified e-mail address and a Discord link before online play)");
         return nil;
     }
     return nxl_record(token, NSDate.date.timeIntervalSince1970, error);
@@ -265,8 +265,9 @@ __attribute__((unused)) static NSDictionary<NSString *, NSString *> *nxl_wait_ca
         request[have] = 0;
         char target[16384] = "";
         NSDictionary<NSString *, NSString *> *query = nil;
-        if (sscanf(request, "GET %16383s HTTP/", target) == 1) {
-            NSURLComponents *url = [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:@(target)]];
+        NSString *path = sscanf(request, "GET %16383s HTTP/", target) == 1 ? [NSString stringWithUTF8String:target] : nil;   // nil when not UTF-8
+        if (path) {
+            NSURLComponents *url = [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:path]];
             NSMutableDictionary *items = [NSMutableDictionary dictionary];
             for (NSURLQueryItem *item in url.queryItems) items[item.name] = item.value ?: @"";
             if ([url.path isEqual:@"/callback"] && [items[@"state"] isEqual:state]) query = items;
@@ -297,12 +298,12 @@ __attribute__((unused)) static NSURL *nxl_authorize_url(NSString *redirect, NSSt
 // nil and the reason when a step fails
 __attribute__((unused)) static NSDictionary *nxl_finish_sign_in(NSDictionary<NSString *, NSString *> *query, NSString *verifier, NSString *redirect, NSString **error) {
     if (!query) { nxl_fail(error, @"no answer from the sign-in page"); return nil; }
-    if (query[@"error"]) { nxl_fail(error, [NSString stringWithFormat:@"Nextendo refused the sign-in (%@)", query[@"error"]]); return nil; }
+    if (query[@"error"]) { nxl_fail(error, [NSString stringWithFormat:@"the sign-in page answered with an error: %@", query[@"error"]]); return nil; }
     NSString *code = query[@"code"];
-    if (code.length == 0) { nxl_fail(error, @"Nextendo sent no sign-in code"); return nil; }
+    if (code.length == 0) { nxl_fail(error, @"the sign-in page returned without an authorization code"); return nil; }
     nxl_write_refresh(nil);
     NSDictionary *grant = @{@"grant_type": @"authorization_code", @"code": code, @"code_verifier": verifier, @"redirect_uri": redirect, @"client_id": kNxClientID};
     if (!nxl_token(grant, error)) return nil;
-    if (!nxl_read_refresh()) { nxl_fail(error, @"Nextendo returned no refresh token, so the sign-in cannot be kept"); return nil; }
+    if (!nxl_read_refresh()) { nxl_fail(error, @"the token answer had no refresh_token, so there is nothing to keep for later"); return nil; }
     return nxl_game_record(error);
 }
