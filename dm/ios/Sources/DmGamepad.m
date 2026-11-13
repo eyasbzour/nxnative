@@ -38,6 +38,7 @@
 #include "pad_apple.h"
 #include "pad_slots.h"
 #include "ctrl_prompt.h"
+#include "input_map.h"
 #include <stdatomic.h>
 #import "DmLayout.h"
 #import "DmGameMenu.h"
@@ -990,6 +991,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 static pad_slots g_slots;
 static GCController *g_held[DM_PLAYERS];   // the controller of each slot, kept alive while it holds it (the slot table keys on its pointer)
 static int g_merge, g_press_to_join, g_touch_own;
+static pad_map g_padmap;   // DM_PAD_MAP (input_map.h): what each physical controller button sends
 static int32_t axis(float v) { return (int32_t)(fmaxf(-1.f, fminf(1.f, v)) * 32767); }
 static const char *pad_name(GCController *c);
 static void npad_name(int p, char *out, size_t cap);
@@ -1014,6 +1016,7 @@ static void read_pad(GCExtendedGamepad *g) {
     }
     if (cp_poll()) return;   // the controller applet's prompt has the controllers (front_ctrl_support)
     dm_haptics_apple_controller(p, g.controller);
+    m = pad_map_apply(&g_padmap, m);   // the launcher's Button mapping (DM_PAD_MAP); the touch gamepad is not mapped
     dm_pad_set_player(p, m, axis(g.leftThumbstick.xAxis.value), axis(g.leftThumbstick.yAxis.value), axis(g.rightThumbstick.xAxis.value), axis(g.rightThumbstick.yAxis.value));
 }
 // Home and Capture: without this iOS takes them as system gestures (Home opens the Games overlay, Capture a screenshot); the app gives them no function
@@ -1026,6 +1029,9 @@ static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_np
 // DM_TOUCH_PLAYER=own (the launcher's Touch gamepad as its own player): the touch gamepad holds player 1 for good, as the Mac keyboard does with DM_KBD_PLAYER=own, so two
 // people can play on one phone (one by touch, one with a controller); the controllers take player 2 on, and the touch gamepad stays on screen while they are connected
 static void pads_start(void) {
+    pad_map_default(&g_padmap);
+    const char *pm = getenv("DM_PAD_MAP");
+    if (pm && *pm) { int bad = pad_map_parse(&g_padmap, pm); LOG("front end: controller buttons from DM_PAD_MAP (%s)%s", pm, bad ? ", malformed entries left out" : ""); }
     const char *e = getenv("DM_PAD_MERGE"); g_merge = e && atoi(e);
     e = getenv("DM_PAD_PRESS_TO_JOIN"); g_press_to_join = !g_merge && e && atoi(e);
     e = getenv("DM_TOUCH_PLAYER"); g_touch_own = !g_merge && e && !strcmp(e, "own");
