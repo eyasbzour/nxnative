@@ -30,6 +30,7 @@ DM_CONTROLS_SCALE	choice	0.75=75%,0.9=90%,1.0=100%,1.15=115%,1.35=135%	1.0	platf
 DM_CONTROLS_OPACITY	choice	0.3=30%,0.5=50%,0.7=70%,1.0=100%	1.0	platform:ios	Controls	Controls opacity
 DM_PAD_EDIT	toggle	-	0	platform:ios	Controls	Edit controls at start	Opens the control editor once when the game starts. You can also choose Edit controls in the in-game menu (the gear) during play.
 DM_PAD_AB	choice	nintendo=Nintendo (A right / B bottom),xbox=Xbox / PlayStation (A bottom / B right)	nintendo	always	Controls	A/B buttons
+DM_TOUCH_PLAYER	toggle	own/shared	0	platform:ios	Controls	Touch gamepad as its own player
 DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
 DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
