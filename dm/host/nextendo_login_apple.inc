@@ -23,14 +23,12 @@
 #include <unistd.h>
 
 // Not every user of this file needs every definition, hence the unused attributes.
-// The public OAuth client: a registered "public application (PKCE)" of Nextendo's, here Mush8's, which the user chose to use until this
-// fork registers its own at nextendo.network/developers. Its sign-in page names that application. Change this one value to switch.
-static NSString *const kNxClientID __attribute__((unused)) = @"nxc_PZv-XFn79sLo";
 static NSString *const kNxScopes __attribute__((unused)) = @"identity friends game.matchmaking presence";
 static NSString *const kNxAuthorize __attribute__((unused)) = @"https://nextendo.network/oauth/authorize";
 static NSString *const kNxTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/oauth/token";
 static NSString *const kNxGameTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/nex-token";
 static NSString *const kNxOnlineStatusEndpoint __attribute__((unused)) = @"https://nextendo.network/api/online-status";
+static NSString *const kNxUserInfoEndpoint __attribute__((unused)) = @"https://nextendo.network/api/oauth/userinfo";
 // The redirect is http://127.0.0.1:<port>/callback. That client was registered with this port, so it is tried first; Nextendo also takes
 // other loopback ports, which are used when it is busy.
 static const uint16_t kNxCallbackPort __attribute__((unused)) = 47823;
@@ -38,6 +36,19 @@ static const NSTimeInterval kNxTimeout __attribute__((unused)) = 12;
 enum { kNxRefreshMax = 8192 };
 
 __attribute__((unused)) static void nxl_fail(NSString **error, NSString *text) { if (error) *error = text; }
+
+// The OAuth client this build signs in as: a "public application (PKCE)" its builder registered at nextendo.network/developers, whose
+// name Nextendo's sign-in page shows. DM_NEXTENDO_CLIENT_ID in the environment (the Mac), else DMNextendoClientID in the app's Info.plist
+// (build_ipa.sh writes it from DM_NEXTENDO_CLIENT_ID at build time). nil when the build has none: then nobody can sign in.
+__attribute__((unused)) static NSString *nxl_client_id(void) {
+    const char *env = getenv("DM_NEXTENDO_CLIENT_ID");
+    id value = env && *env ? @(env) : [NSBundle.mainBundle objectForInfoDictionaryKey:@"DMNextendoClientID"];
+    if (![value isKindOfClass:NSString.class] || [value length] == 0 || [value length] > 128) return nil;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_."];
+    return [value rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound ? value : nil;
+}
+static NSString *const kNxNoClient __attribute__((unused)) =
+    @"this build has no Nextendo client ID: register a public application at nextendo.network/developers and build with DM_NEXTENDO_CLIENT_ID set to its ID";
 
 // ---- The stored refresh token ----
 
@@ -188,6 +199,26 @@ __attribute__((unused)) static NSDictionary *nxl_record(NSString *token, NSTimeI
              @"scopes": [kNxScopes componentsSeparatedByString:@" "]};
 }
 
+// /api/oauth/userinfo names the account the sign-in belongs to. The game token must be that account's (NX Port Studio checks the same):
+// a mismatch, or no answer, gives no record
+__attribute__((unused)) static BOOL nxl_same_account(NSString *access, NSDictionary *record, NSString **error) {
+    NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxUserInfoEndpoint]
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
+    [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
+    NSDictionary *answer = nxl_send(get, error);
+    if (!answer) return NO;
+    NSNumber *pid = record[@"identity"][@"pid"]; NSString *username = record[@"identity"][@"username"];
+    bool named = false, same = true;   // the account may sit at the top level, under "account" or under "identity"; each one present must agree
+    for (id place in @[answer, answer[@"account"] ?: NSNull.null, answer[@"identity"] ?: NSNull.null]) {
+        if (![place isKindOfClass:NSDictionary.class] || !place[@"pid"]) continue;
+        named = true;
+        same = same && [place[@"pid"] isKindOfClass:NSNumber.class] && [place[@"pid"] isEqual:pid] && [place[@"username"] isEqual:username];
+    }
+    if (!named) { nxl_fail(error, @"nextendo.network did not say which account the sign-in belongs to"); return NO; }
+    if (!same) { nxl_fail(error, @"the game token belongs to another account than the sign-in; sign out and sign in again"); return NO; }
+    return YES;
+}
+
 // /api/online-status says whether this account may play online now: {"allow": true}, or {"allow": false, "reason": ...}. When it refuses,
 // the reason in words for the player; nil when it allows, cannot be asked, or gives no answer
 __attribute__((unused)) static NSString *nxl_online_refusal(NSString *access) {
@@ -218,7 +249,9 @@ __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
 #endif
         return nil;
     }
-    NSString *access = nxl_token(@{@"grant_type": @"refresh_token", @"refresh_token": refresh, @"client_id": kNxClientID}, error);
+    NSString *client = nxl_client_id();
+    if (!client) { nxl_fail(error, kNxNoClient); return nil; }
+    NSString *access = nxl_token(@{@"grant_type": @"refresh_token", @"refresh_token": refresh, @"client_id": client}, error);
     if (!access) return nil;
     NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxGameTokenEndpoint]
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
@@ -231,7 +264,8 @@ __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
         else if (answer) nxl_fail(error, @"Nextendo issued no game token for this account (Nextendo asks for a verified e-mail address and a Discord link before online play)");
         return nil;
     }
-    return nxl_record(token, NSDate.date.timeIntervalSince1970, error);
+    NSDictionary *record = nxl_record(token, NSDate.date.timeIntervalSince1970, error);
+    return record && nxl_same_account(access, record, error) ? record : nil;
 }
 
 // ---- Signing in (the browser part belongs to the caller: the Mac opens the default browser, the iPhone a web authentication session) ----
@@ -307,7 +341,9 @@ __attribute__((unused)) static NSURL *nxl_authorize_url(NSString *redirect, NSSt
     NSMutableData *challenge = [NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(plain.bytes, (CC_LONG)plain.length, challenge.mutableBytes);
     NSURLComponents *page = [NSURLComponents componentsWithString:kNxAuthorize];
-    NSDictionary<NSString *, NSString *> *parameters = @{@"response_type": @"code", @"client_id": kNxClientID, @"redirect_uri": redirect, @"scope": kNxScopes,
+    NSString *client = nxl_client_id();
+    if (!client) return nil;   // callers check nxl_client_id() first
+    NSDictionary<NSString *, NSString *> *parameters = @{@"response_type": @"code", @"client_id": client, @"redirect_uri": redirect, @"scope": kNxScopes,
                                                          @"state": state, @"code_challenge": nxl_b64url(challenge), @"code_challenge_method": @"S256"};
     NSMutableArray<NSURLQueryItem *> *items = [NSMutableArray array];
     for (NSString *name in [parameters.allKeys sortedArrayUsingSelector:@selector(compare:)]) [items addObject:[NSURLQueryItem queryItemWithName:name value:parameters[name]]];
@@ -323,7 +359,9 @@ __attribute__((unused)) static NSDictionary *nxl_finish_sign_in(NSDictionary<NSS
     NSString *code = query[@"code"];
     if (code.length == 0) { nxl_fail(error, @"the sign-in page returned without an authorization code"); return nil; }
     nxl_write_refresh(nil);
-    NSDictionary *grant = @{@"grant_type": @"authorization_code", @"code": code, @"code_verifier": verifier, @"redirect_uri": redirect, @"client_id": kNxClientID};
+    NSString *client = nxl_client_id();
+    if (!client) { nxl_fail(error, kNxNoClient); return nil; }
+    NSDictionary *grant = @{@"grant_type": @"authorization_code", @"code": code, @"code_verifier": verifier, @"redirect_uri": redirect, @"client_id": client};
     if (!nxl_token(grant, error)) return nil;
     if (!nxl_read_refresh()) { nxl_fail(error, @"the token answer had no refresh_token, so there is nothing to keep for later"); return nil; }
     return nxl_game_record(error);

@@ -18,7 +18,8 @@
 #   both are also the launcher's defaults (dm/launcher.json from dm/games/settings.py; the player's choice there wins over them, Documents/env.txt over the choice);
 #   the IPA name, code modules, RomFS marker and shader tables come from the game profile
 #   DM_NEXTENDO_SERVICES=<folder> (the NSP script's --nextendo): the public Nextendo service profile into dm/nextendo-services (main.m); a $PATCHED/nextendo (Nextendo's patched main)
-#   goes in as module nmain (gen_embed.py) with its tables in dm/nextendo; DM_NETWORK and DM_NEXTENDO are the launcher's Network defaults (dm/games/settings.tsv)
+#   goes in as module nmain (gen_embed.py) with its tables in dm/nextendo; DM_NETWORK and DM_NEXTENDO are the launcher's Network defaults (dm/games/settings.tsv);
+#   DM_NEXTENDO_CLIENT_ID=<id> is the Nextendo application the app signs in as (DMNextendoClientID in Info.plist)
 #   PROGRAMS_TSV=<file> (the NSP script, a multi-program application: Super Mario 3D All-Stars): one app holding several programs, one row each, "<index>\t<profile>\t<patched>\t<RomFS>\t<iOS shaders>\t<graphics API>",
 #   program 0's being GAME / PATCHED / ROMFS / MSL_IOS / GFXAPI (the app's name, version, icon and identity are its). Each program's modules go in sections tagged p<N> (gen_embed.py --tag),
 #   its tables and launcher settings in dm/p<N>/, its RomFS and offline HTML pages in p<N>/, its shader libraries in msl/p<N>/, and the host is built over a table of their profiles
@@ -198,6 +199,11 @@ COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -
 case "$MSLDIR" in b-*) /usr/libexec/PlistBuddy -c "Add :DMChain string ${MSLDIR#b-}" Gen/Info.plist > /dev/null || die "DMChain";; esac
 # DM_METAL_CAPTURE=1: a development build that may write GPU frame captures (MetalCaptureEnabled; the host's DM_GPU_CAPTURE switch writes them to Documents/gpu_captures)
 if [ "${DM_METAL_CAPTURE:-0}" = 1 ]; then /usr/libexec/PlistBuddy -c "Add :MetalCaptureEnabled bool true" Gen/Info.plist > /dev/null || die "MetalCaptureEnabled"; t "Metal frame capture: enabled (DM_METAL_CAPTURE=1)"; fi
+# The Nextendo application the app signs in as (DMNextendoClientID, read by dm/host/nextendo_login_apple.inc); without one the app cannot sign in
+if [ -n "${DM_NEXTENDO_SERVICES:-}" ]; then
+  if [ -n "${DM_NEXTENDO_CLIENT_ID:-}" ]; then /usr/libexec/PlistBuddy -c "Add :DMNextendoClientID string $DM_NEXTENDO_CLIENT_ID" Gen/Info.plist > /dev/null || die "DMNextendoClientID"; t "Nextendo: signs in as client $DM_NEXTENDO_CLIENT_ID"
+  else t "Nextendo: no DM_NEXTENDO_CLIENT_ID, so this app cannot sign in (register a public application at nextendo.network/developers)"; fi
+fi
 RP=; if [ -n "${PROGRAMS_TSV:-}" ]; then   # a game of several programs: each program's files, which the Xcode build phase copies under p<index> as the IPA has them (stage_resources.sh)
   RP=Gen/resources_programs.tsv; printf '# program\tRomFS\tmarker\tiOS shaders\tshader folder (build_ipa.sh)\n' > "$RP"
   M0=$MSLDIR; while IFS= read -r row; do prog_set "$row"; printf '%s\t%s\t%s\t%s\t%s\n' "$PN" "$ROMFS" "$MARKER" "$(lib_path "$MSL_IOS/$MSLDIR")" "$MSLDIR" >> "$RP"; done < <(prog_rows); prog_back; MSLDIR=$M0; fi
