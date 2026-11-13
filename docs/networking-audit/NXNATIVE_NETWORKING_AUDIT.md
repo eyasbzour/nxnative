@@ -5,7 +5,7 @@ Status: source audit only. Worktree `C:\Users\Eyasb\Documents\nx-ldn`, branch `i
 ## Repository/license context
 
 - Repo: `eyasbzour/nxnative` (`origin`), upstream remote `seedds/nxnative`.
-- License: MIT (`LICENSE`, Copyright 2026 seedds). Mush8/nxhost are GPL-3.0. The fork sends no PRs to seedds, and Mush8 code may be reused in it with GPL-3.0 headers on derived files (decision of 2026-11-10, see `IMPLEMENTATION_PLAN.md`).
+- License: MIT (`LICENSE`, Copyright 2026 seedds). Mush8/nxhost are GPL-3.0. Since 2026-11-14 the fork holds no Mush8-derived code; Mush8 is a reference for facts (see `IMPLEMENTATION_PLAN.md`).
 
 ## Networking/HLE files (current surface)
 

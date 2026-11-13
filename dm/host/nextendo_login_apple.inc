@@ -1,235 +1,308 @@
-// SPDX-License-Identifier: GPL-3.0-only
-// Nextendo sign-in for this fork on the Mac and the iPhone, shared by the host (hle_nextendo_login_apple.m), the Mac sign-in tool (dm/tools/nextendo_login.m)
-// and the iPhone app's sign-in (dm/ios/Sources/NextendoSignIn.m).
-// The flow is Mush8's (c22dev/mush8 launcher/Nextendo.swift @ 9322831c, GPL-3.0): OAuth 2 with PKCE in the browser and a loopback redirect, then a refresh
-// token kept on the device, which turns into the game token (nx2) when a game needs one. This file is derived from that code, so it is GPL-3.0 (docs/networking-audit).
-// The refresh token lives in a private file (0600, in a 0700 folder; nxl_dir below), not the Keychain: every rebuild of dmhost is a new program to the Keychain,
-// which would ask again each time. On the iPhone the folder is inside the app's own container. No token is ever logged: the errors carry Nextendo's error codes and HTTP statuses only.
+// SPDX-License-Identifier: MIT
+// Nextendo sign-in on the Mac and the iPhone. Users: the host's credential provider (hle_nextendo_login_apple.m), the Mac tool
+// (dm/tools/nextendo_login.m) and the iPhone app (dm/ios/Sources/NextendoSignIn.m). Written from Nextendo's public OAuth interface:
+//   - sign-in: OAuth 2 authorization code with PKCE (S256) at /oauth/authorize, redirected to a loopback address on this device;
+//   - /api/oauth/token trades the code, later the stored refresh token, for an access token, and sends a new refresh token each time;
+//   - /api/nex-token, with that access token, gives the game token: "nx2." base64url("<pid>.<username>.<expiry seconds>") "." signature.
+// Only the refresh token is kept, in a private file (0600 in a 0700 folder) rather than the Keychain, which would ask again after every
+// rebuild of dmhost; on the iPhone the folder is in the app's container. Tokens never go to the log: errors carry Nextendo's error code
+// or the HTTP status.
 #import <Foundation/Foundation.h>
 #import <Security/Security.h>
 #include <CommonCrypto/CommonDigest.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <arpa/inet.h>
 #include <math.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdatomic.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
-// (Each user of this file uses some of these: unused is not a warning.)
-// Mush8's registered public client, borrowed until this fork registers its own (nextendo.network/developers, a "Public application (desktop / mobile, PKCE)"
-// with the redirect below): Nextendo's sign-in page names Mush8, and Mush8 or Nextendo can revoke it. Replace this one value with the fork's own ID
+// Not every user of this file needs every definition, hence the unused attributes.
+// The public OAuth client: a registered "public application (PKCE)" of Nextendo's, here Mush8's, which the user chose to use until this
+// fork registers its own at nextendo.network/developers. Its sign-in page names that application. Change this one value to switch.
 static NSString *const kNxClientID __attribute__((unused)) = @"nxc_PZv-XFn79sLo";
 static NSString *const kNxScopes __attribute__((unused)) = @"identity friends game.matchmaking presence";
 static NSString *const kNxAuthorize __attribute__((unused)) = @"https://nextendo.network/oauth/authorize";
 static NSString *const kNxTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/oauth/token";
 static NSString *const kNxGameTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/nex-token";
-static const uint16_t kNxCallbackPort __attribute__((unused)) = 47823;   // http://127.0.0.1:<port>/callback, Mush8's port first, any free one otherwise (Nextendo allows dynamic loopback ports)
+// The redirect is http://127.0.0.1:<port>/callback. That client was registered with this port, so it is tried first; Nextendo also takes
+// other loopback ports, which are used when it is busy.
+static const uint16_t kNxCallbackPort __attribute__((unused)) = 47823;
 static const NSTimeInterval kNxTimeout __attribute__((unused)) = 12;
+enum { kNxRefreshMax = 8192 };
 
-static NSString *nxl_dir(void) {
-    const char *custom = getenv("DM_NEXTENDO_LOGIN_DIR");
-    if (custom && *custom) return [NSString stringWithUTF8String:custom];
-    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/nxnative/nextendo"];
+__attribute__((unused)) static void nxl_fail(NSString **error, NSString *text) { if (error) *error = text; }
+
+// ---- The stored refresh token ----
+
+__attribute__((unused)) static NSString *nxl_dir(void) {
+    const char *dir = getenv("DM_NEXTENDO_LOGIN_DIR");   // tests point it at a scratch folder
+    return dir && *dir ? @(dir) : [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/nxnative/nextendo"];
 }
-static NSString *nxl_refresh_path(void) { return [nxl_dir() stringByAppendingPathComponent:@"refresh_token"]; }
+__attribute__((unused)) static NSString *nxl_refresh_path(void) { return [nxl_dir() stringByAppendingPathComponent:@"refresh_token"]; }
 
-// The stored refresh token, or nil: a regular file of this user's, readable by no one else, no symbolic link
-static NSString *nxl_read_refresh(void) {
-    int fd = open(nxl_refresh_path().fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+// nil unless the file is a regular file of this user's that no one else can read, and not a link
+__attribute__((unused)) static NSString *nxl_read_refresh(void) {
+    int fd = open(nxl_refresh_path().fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return nil;
-    struct stat st;
-    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || (st.st_mode & 077) || st.st_uid != geteuid() || st.st_size <= 0 || st.st_size > 8192) { close(fd); return nil; }
-    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)st.st_size];
-    size_t done = 0;
-    while (done < data.length) { ssize_t n = read(fd, (char *)data.mutableBytes + done, data.length - done); if (n <= 0) { close(fd); return nil; } done += (size_t)n; }
+    struct stat info;
+    bool private_file = !fstat(fd, &info) && S_ISREG(info.st_mode) && !(info.st_mode & (S_IRWXG | S_IRWXO)) && info.st_uid == geteuid()
+                        && info.st_size > 0 && info.st_size <= kNxRefreshMax;
+    char text[kNxRefreshMax + 1]; ssize_t length = 0;
+    if (private_file) {
+        for (ssize_t n; length < info.st_size && (n = read(fd, text + length, (size_t)(info.st_size - length))) > 0;) length += n;
+        private_file = length == info.st_size;
+    }
     close(fd);
-    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    text = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    return text.length ? text : nil;
+    if (!private_file) return nil;
+    NSString *token = [[NSString alloc] initWithBytes:text length:(NSUInteger)length encoding:NSUTF8StringEncoding];
+    token = [token stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return token.length ? token : nil;
 }
-// Replaces the stored refresh token atomically (a nil token removes it). YES on success
-static BOOL nxl_write_refresh(NSString *token) {
-    NSString *path = nxl_refresh_path();
-    if (!token) return !unlink(path.fileSystemRepresentation) || errno == ENOENT;
+
+// Saves the token through a temporary file and a rename, so a reader sees the old one or the new one; nil deletes it
+__attribute__((unused)) static BOOL nxl_write_refresh(NSString *token) {
+    const char *path = nxl_refresh_path().fileSystemRepresentation;
+    if (!token) return unlink(path) == 0 || errno == ENOENT;
     NSString *dir = nxl_dir();
-    if (![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:nil]) return NO;
-    if (chmod(dir.fileSystemRepresentation, 0700)) return NO;
-    NSString *temporary = [path stringByAppendingFormat:@".%d.tmp", getpid()];
-    unlink(temporary.fileSystemRepresentation);
-    int fd = open(temporary.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    NSError *problem = nil;
+    if (![NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions: @0700} error:&problem]
+        || chmod(dir.fileSystemRepresentation, 0700) != 0) return NO;
+    NSString *staging = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@".refresh_token.%d", getpid()]];
+    unlink(staging.fileSystemRepresentation);
+    int fd = open(staging.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return NO;
-    NSData *bytes = [token dataUsingEncoding:NSUTF8StringEncoding];
-    BOOL ok = write(fd, bytes.bytes, bytes.length) == (ssize_t)bytes.length && !fsync(fd);
-    ok = !close(fd) && ok;
-    if (ok) ok = !rename(temporary.fileSystemRepresentation, path.fileSystemRepresentation);
-    if (!ok) unlink(temporary.fileSystemRepresentation);
-    return ok;
+    const char *bytes = token.UTF8String; size_t size = strlen(bytes), written = 0;
+    for (ssize_t n; written < size && (n = write(fd, bytes + written, size - written)) > 0;) written += (size_t)n;
+    bool saved = written == size && fsync(fd) == 0;
+    saved = close(fd) == 0 && saved && rename(staging.fileSystemRepresentation, path) == 0;
+    if (!saved) unlink(staging.fileSystemRepresentation);
+    return saved;
 }
 
-static NSString *nxl_b64url(NSData *data) {
-    NSString *s = [[data base64EncodedStringWithOptions:0] stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
-    return [[s stringByReplacingOccurrencesOfString:@"/" withString:@"_"] stringByReplacingOccurrencesOfString:@"=" withString:@""];
-}
-static NSData *nxl_unb64url(NSString *s) {
-    NSString *n = [[s stringByReplacingOccurrencesOfString:@"-" withString:@"+"] stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
-    n = [n stringByPaddingToLength:(n.length + 3) & ~(NSUInteger)3 withString:@"=" startingAtIndex:0];
-    return [[NSData alloc] initWithBase64EncodedString:n options:0];
-}
-static NSString *nxl_form(NSDictionary<NSString *, NSString *> *form) {
-    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet]; [allowed addCharactersInString:@"-._~"];
-    NSMutableArray *pairs = [NSMutableArray new];
-    for (NSString *key in form) [pairs addObject:[NSString stringWithFormat:@"%@=%@", key, [form[key] stringByAddingPercentEncodingWithAllowedCharacters:allowed]]];
-    return [pairs componentsJoinedByString:@"&"];
-}
-static void nxl_fail(NSString **error, NSString *text) { if (error) *error = text; }
+// ---- Encoding ----
 
-// One HTTPS request with a bounded wait: the JSON object of an HTTP 200, otherwise nil and Nextendo's error code (or the status) in *error
-static NSDictionary *nxl_send(NSURLRequest *request, NSString **error) {
-    __block NSData *body = nil; __block NSInteger status = 0; __block NSError *failure = nil;
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+__attribute__((unused)) static NSString *nxl_b64url(NSData *data) {
+    NSMutableString *text = [[data base64EncodedStringWithOptions:0] mutableCopy];
+    [text replaceOccurrencesOfString:@"+" withString:@"-" options:0 range:NSMakeRange(0, text.length)];
+    [text replaceOccurrencesOfString:@"/" withString:@"_" options:0 range:NSMakeRange(0, text.length)];
+    [text replaceOccurrencesOfString:@"=" withString:@"" options:0 range:NSMakeRange(0, text.length)];
+    return text;
+}
+__attribute__((unused)) static NSData *nxl_unb64url(NSString *text) {
+    NSMutableString *padded = [text mutableCopy];
+    [padded replaceOccurrencesOfString:@"-" withString:@"+" options:0 range:NSMakeRange(0, padded.length)];
+    [padded replaceOccurrencesOfString:@"_" withString:@"/" options:0 range:NSMakeRange(0, padded.length)];
+    while (padded.length % 4) [padded appendString:@"="];
+    return [[NSData alloc] initWithBase64EncodedString:padded options:0];
+}
+// application/x-www-form-urlencoded, with only RFC 3986's unreserved characters left as they are
+__attribute__((unused)) static NSData *nxl_form_body(NSDictionary<NSString *, NSString *> *fields) {
+    NSCharacterSet *unreserved = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"];
+    NSMutableArray<NSString *> *pairs = [NSMutableArray arrayWithCapacity:fields.count];
+    [fields enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *value, BOOL *stop) {
+        (void)stop; [pairs addObject:[NSString stringWithFormat:@"%@=%@", name, [value stringByAddingPercentEncodingWithAllowedCharacters:unreserved]]];
+    }];
+    return [[pairs componentsJoinedByString:@"&"] dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+// ---- Nextendo's HTTPS endpoints ----
+
+// Sends one request and waits for it (the request's timeout bounds the wait). The JSON object of a 200 answer; otherwise nil, with
+// Nextendo's "error" code, the HTTP status or the transport's failure in *error
+__attribute__((unused)) static NSDictionary *nxl_send(NSURLRequest *request, NSString **error) {
+    __block NSData *body; __block NSHTTPURLResponse *response; __block NSError *transport;
+    dispatch_semaphore_t finished = dispatch_semaphore_create(0);
     NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.ephemeralSessionConfiguration];
-    [[session dataTaskWithRequest:request completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        body = d; failure = e; status = [r isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)r).statusCode : 0;
-        dispatch_semaphore_signal(done);
+    [[session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *answer, NSError *failure) {
+        body = data; transport = failure; response = [answer isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)answer : nil;
+        dispatch_semaphore_signal(finished);
     }] resume];
-    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);   // the request's own timeout ends the wait
+    dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
     [session finishTasksAndInvalidate];
-    id json = body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:nil] : nil;
-    NSDictionary *object = [json isKindOfClass:NSDictionary.class] ? json : nil;
-    if (status != 200) {
-        NSString *code = [object[@"error"] isKindOfClass:NSString.class] ? object[@"error"] : nil;
-        nxl_fail(error, code ?: failure ? [NSString stringWithFormat:@"no answer from Nextendo (%@)", failure.localizedDescription] : [NSString stringWithFormat:@"Nextendo answered HTTP %ld", (long)status]);
+    id parsed = body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:nil] : nil;
+    NSDictionary *json = [parsed isKindOfClass:NSDictionary.class] ? parsed : nil;
+    if (response.statusCode == 200) {
+        if (!json) nxl_fail(error, @"Nextendo's answer was not JSON");
+        return json;
+    }
+    id code = json[@"error"];
+    if ([code isKindOfClass:NSString.class]) nxl_fail(error, code);
+    else if (!response) nxl_fail(error, [NSString stringWithFormat:@"no answer from Nextendo (%@)", transport.localizedDescription ?: @"no response"]);
+    else nxl_fail(error, [NSString stringWithFormat:@"Nextendo answered HTTP %ld", (long)response.statusCode]);
+    return nil;
+}
+
+// POSTs a grant to the token endpoint. Returns the access token and saves the refresh token that comes with it. A refused refresh
+// token (invalid_grant) is deleted, since it will never work again
+__attribute__((unused)) static NSString *nxl_token(NSDictionary<NSString *, NSString *> *grant, NSString **error) {
+    NSMutableURLRequest *post = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxTokenEndpoint]
+                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
+    post.HTTPMethod = @"POST";
+    post.HTTPBody = nxl_form_body(grant);
+    [post setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+    NSString *why = nil;
+    NSDictionary *answer = nxl_send(post, &why);
+    if (!answer) {
+        bool refreshing = [grant[@"grant_type"] isEqual:@"refresh_token"];
+        if (refreshing && [why isEqual:@"invalid_grant"]) { nxl_write_refresh(nil); why = @"the Nextendo sign-in has expired: sign in again"; }
+        nxl_fail(error, why);
         return nil;
     }
-    if (!object) nxl_fail(error, @"Nextendo's answer was not JSON");
-    return object;
-}
-// The token endpoint: returns the access token, and stores the refresh token Nextendo sends back (it rotates them)
-static NSString *nxl_token(NSDictionary<NSString *, NSString *> *form, NSString **error) {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxTokenEndpoint] cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
-    request.HTTPMethod = @"POST";
-    [request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
-    request.HTTPBody = [nxl_form(form) dataUsingEncoding:NSUTF8StringEncoding];
-    NSString *failure = nil;
-    NSDictionary *json = nxl_send(request, &failure);
-    if (!json) {
-        if ([failure isEqual:@"invalid_grant"] && [form[@"grant_type"] isEqual:@"refresh_token"]) { nxl_write_refresh(nil); failure = @"the Nextendo sign-in has expired: sign in again (nextendo_login sign-in)"; }
-        nxl_fail(error, failure); return nil;
+    NSString *access = answer[@"access_token"], *refresh = answer[@"refresh_token"];
+    if (![access isKindOfClass:NSString.class] || access.length == 0) { nxl_fail(error, @"Nextendo sent no access token"); return nil; }
+    if ([refresh isKindOfClass:NSString.class] && refresh.length && !nxl_write_refresh(refresh)) {
+        nxl_fail(error, @"the new Nextendo sign-in could not be saved");
+        return nil;
     }
-    NSString *access = json[@"access_token"];
-    if (![access isKindOfClass:NSString.class] || !access.length) { nxl_fail(error, @"Nextendo sent no access token"); return nil; }
-    NSString *refresh = json[@"refresh_token"];
-    if ([refresh isKindOfClass:NSString.class] && refresh.length && !nxl_write_refresh(refresh)) { nxl_fail(error, @"the renewed sign-in could not be stored"); return nil; }
     return access;
 }
 
-// The credential record hle_nextendo_apple.m's decode_credential accepts, from the nx2 game token Nextendo issued: the identity is the token's own payload
-// (pid.username.expiry, the expiry in seconds), never a second source that could disagree with it. nil and a reason when the token is not one
-static NSDictionary *nxl_record(NSString *token, NSTimeInterval now, NSString **error) {
-    NSArray<NSString *> *parts = [token componentsSeparatedByString:@"."];
-    if (parts.count != 3 || ![parts[0] isEqual:@"nx2"]) { nxl_fail(error, @"Nextendo's game token is not an nx2 token"); return nil; }
-    NSData *payload = nxl_unb64url(parts[1]);
-    NSString *text = payload ? [[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding] : nil;
-    NSArray<NSString *> *claims = [text componentsSeparatedByString:@"."];
-    if (claims.count < 3) { nxl_fail(error, @"Nextendo's game token names no identity"); return nil; }
-    unsigned long long pid = 0, expiry = 0;
-    NSScanner *p = [NSScanner scannerWithString:claims.firstObject], *x = [NSScanner scannerWithString:claims.lastObject];
-    if (![p scanUnsignedLongLong:&pid] || !p.isAtEnd || !pid || ![x scanUnsignedLongLong:&expiry] || !x.isAtEnd) { nxl_fail(error, @"Nextendo's game token names no identity"); return nil; }
-    NSString *username = [[claims subarrayWithRange:NSMakeRange(1, claims.count - 2)] componentsJoinedByString:@"."];
-    if (!username.length || (double)expiry <= now) { nxl_fail(error, @"Nextendo's game token has already expired"); return nil; }
+// The record hle_nextendo_apple.m's decode_credential accepts for an nx2 game token. Its identity is read from the token itself
+// ("<pid>.<username>.<expiry>"; a username may contain dots), so the two can never disagree
+__attribute__((unused)) static NSDictionary *nxl_record(NSString *token, NSTimeInterval now, NSString **error) {
+    NSArray<NSString *> *segments = [token componentsSeparatedByString:@"."];
+    if (segments.count != 3 || ![segments[0] isEqual:@"nx2"]) { nxl_fail(error, @"Nextendo's game token is not an nx2 token"); return nil; }
+    NSData *payload = nxl_unb64url(segments[1]);
+    NSString *claims = payload ? [[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding] : nil;
+    NSRange first = [claims rangeOfString:@"."], last = [claims rangeOfString:@"." options:NSBackwardsSearch];
+    if (!claims || first.location == NSNotFound || last.location <= first.location + 1) { nxl_fail(error, @"Nextendo's game token names no identity"); return nil; }
+    NSString *pidText = [claims substringToIndex:first.location], *expiryText = [claims substringFromIndex:last.location + 1];
+    NSString *username = [claims substringWithRange:NSMakeRange(first.location + 1, last.location - first.location - 1)];
+    NSCharacterSet *notDigit = NSCharacterSet.decimalDigitCharacterSet.invertedSet;
+    unsigned long long pid = strtoull(pidText.UTF8String, NULL, 10), expiry = strtoull(expiryText.UTF8String, NULL, 10);
+    bool numeric = pidText.length && expiryText.length && pidText.length <= 20 && expiryText.length <= 20
+                   && [pidText rangeOfCharacterFromSet:notDigit].location == NSNotFound && [expiryText rangeOfCharacterFromSet:notDigit].location == NSNotFound;
+    if (!numeric || pid == 0) { nxl_fail(error, @"Nextendo's game token names no identity"); return nil; }
+    if ((double)expiry <= now) { nxl_fail(error, @"Nextendo's game token has already expired"); return nil; }
     return @{@"schema_version": @1, @"token_kind": @"nex", @"token": token,
              @"identity": @{@"pid": @(pid), @"username": username},
              @"created_at": @(floor(now)), @"expires_at": @(expiry),
              @"scopes": [kNxScopes componentsSeparatedByString:@" "]};
 }
-// The stored sign-in → a fresh access token → the game token → its record. nil and a reason when any step fails
-static NSDictionary *nxl_game_record(NSString **error) {
+
+// From the saved sign-in to a game token's record: refresh grant, then /api/nex-token. nil and the reason when a step fails
+__attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
     NSString *refresh = nxl_read_refresh();
+    if (!refresh) {
 #if TARGET_OS_IPHONE
-    if (!refresh) { nxl_fail(error, @"this iPhone is not signed in to Nextendo: sign in on the game's settings screen"); return nil; }
+        nxl_fail(error, @"this iPhone is not signed in to Nextendo: sign in on the game's settings screen");
 #else
-    if (!refresh) { nxl_fail(error, @"this Mac is not signed in to Nextendo: run nextendo_login sign-in"); return nil; }
+        nxl_fail(error, @"this Mac is not signed in to Nextendo: run nextendo_login sign-in");
 #endif
-    NSString *access = nxl_token(@{@"grant_type": @"refresh_token", @"client_id": kNxClientID, @"refresh_token": refresh}, error);
+        return nil;
+    }
+    NSString *access = nxl_token(@{@"grant_type": @"refresh_token", @"refresh_token": refresh, @"client_id": kNxClientID}, error);
     if (!access) return nil;
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxGameTokenEndpoint] cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
-    [request setValue:[@"Bearer " stringByAppendingString:access] forHTTPHeaderField:@"Authorization"];
-    NSDictionary *json = nxl_send(request, error);
-    if (!json) return nil;
-    NSString *token = json[@"nex_token"];
-    if (![token isKindOfClass:NSString.class] || !token.length) { nxl_fail(error, @"Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account"); return nil; }
+    NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxGameTokenEndpoint]
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
+    [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
+    NSDictionary *answer = nxl_send(get, error);
+    if (!answer) return nil;
+    NSString *token = answer[@"nex_token"];
+    if (![token isKindOfClass:NSString.class] || token.length == 0) {
+        nxl_fail(error, @"Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account");
+        return nil;
+    }
     return nxl_record(token, NSDate.date.timeIntervalSince1970, error);
 }
 
-// The sign-in itself, for the Mac tool and the iPhone app: a loopback listener on 127.0.0.1 for the redirect, the authorize URL with PKCE, then the code exchanged
-// for the tokens. The browser part is the caller's (the Mac opens the default browser, the iPhone an ASWebAuthenticationSession).
-__attribute__((unused)) static NSString *nxl_random_urlsafe(size_t count) {
-    uint8_t bytes[64];
-    if (count > sizeof bytes || SecRandomCopyBytes(kSecRandomDefault, count, bytes)) return nil;
-    return nxl_b64url([NSData dataWithBytes:bytes length:count]);
+// ---- Signing in (the browser part belongs to the caller: the Mac opens the default browser, the iPhone a web authentication session) ----
+
+__attribute__((unused)) static NSString *nxl_random_urlsafe(size_t bytes) {
+    NSMutableData *random = [NSMutableData dataWithLength:bytes];
+    if (bytes == 0 || bytes > 64 || SecRandomCopyBytes(kSecRandomDefault, bytes, random.mutableBytes) != errSecSuccess) return nil;
+    return nxl_b64url(random);
 }
-// The redirect's listener: Mush8's port when it is free, any port otherwise. -1 on failure
+
+// A TCP listener on 127.0.0.1 for the redirect: kNxCallbackPort when free, else a port the system picks. The descriptor, or -1
 __attribute__((unused)) static int nxl_listen_loopback(uint16_t *port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
-    int one = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    struct sockaddr_in a = {.sin_len = sizeof a, .sin_family = AF_INET, .sin_port = htons(kNxCallbackPort), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
-    if (bind(fd, (struct sockaddr *)&a, sizeof a)) { a.sin_port = 0; if (bind(fd, (struct sockaddr *)&a, sizeof a)) { close(fd); return -1; } }
-    socklen_t n = sizeof a;
-    if (listen(fd, 4) || getsockname(fd, (struct sockaddr *)&a, &n)) { close(fd); return -1; }
-    *port = ntohs(a.sin_port); return fd;
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+    struct sockaddr_in address = {.sin_len = sizeof address, .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    const uint16_t tries[2] = {kNxCallbackPort, 0};
+    bool bound = false;
+    for (int i = 0; i < 2 && !bound; i++) { address.sin_port = htons(tries[i]); bound = bind(fd, (struct sockaddr *)&address, sizeof address) == 0; }
+    socklen_t size = sizeof address;
+    if (!bound || listen(fd, 4) != 0 || getsockname(fd, (struct sockaddr *)&address, &size) != 0) { close(fd); return -1; }
+    *port = ntohs(address.sin_port);
+    return fd;
 }
-__attribute__((unused)) static void nxl_reply(int c, const char *status, const char *body) {
-    char head[256]; int n = snprintf(head, sizeof head, "HTTP/1.1 %s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", status, strlen(body));
-    (void)!write(c, head, (size_t)n); (void)!write(c, body, strlen(body));
+
+__attribute__((unused)) static void nxl_answer(int client, int status, const char *html) {
+    char header[200];
+    int length = snprintf(header, sizeof header, "HTTP/1.1 %d %s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                          status, status == 200 ? "OK" : "Not Found", strlen(html));
+    (void)!write(client, header, (size_t)length);
+    (void)!write(client, html, strlen(html));
 }
-// Waits for the browser's GET /callback carrying our state, answering anything else with 404. The query, or nil when the time runs out or *cancel (may be NULL) is set
+
+// Serves the listener until a GET /callback with our state arrives (anything else gets a 404) and returns its query parameters.
+// nil once `seconds` pass or *cancel (may be NULL) becomes nonzero; the poll wakes twice a second to notice that
 __attribute__((unused)) static NSDictionary<NSString *, NSString *> *nxl_wait_callback(int fd, NSString *state, int seconds, _Atomic int *cancel) {
-    time_t end = time(NULL) + seconds;
-    for (;;) {
-        if ((cancel && atomic_load(cancel)) || time(NULL) >= end) return nil;
-        struct pollfd p = {.fd = fd, .events = POLLIN};
-        if (poll(&p, 1, 500) <= 0) continue;   // half a second, so a cancel is seen soon
-        int c = accept(fd, NULL, NULL);
-        if (c < 0) continue;
-        struct timeval tv = {5, 0}; setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-        char buf[16384]; size_t got = 0;
-        while (got < sizeof buf - 1) { ssize_t n = read(c, buf + got, sizeof buf - 1 - got); if (n <= 0) break; got += (size_t)n; buf[got] = 0; if (strstr(buf, "\r\n")) break; }
-        buf[got] = 0;
-        NSString *line = [[[NSString alloc] initWithUTF8String:buf] componentsSeparatedByString:@"\r\n"].firstObject;
-        NSArray<NSString *> *words = [line componentsSeparatedByString:@" "];
-        NSURLComponents *url = words.count >= 2 && [words[0] isEqual:@"GET"] ? [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:words[1]]] : nil;
-        NSMutableDictionary *query = [NSMutableDictionary new];
-        for (NSURLQueryItem *item in url.queryItems) query[item.name] = item.value ?: @"";
-        if (![url.path isEqual:@"/callback"] || ![query[@"state"] isEqual:state]) { nxl_reply(c, "404 Not Found", ""); close(c); continue; }
-        nxl_reply(c, "200 OK", "<!doctype html><title>nxnative</title><p>Nextendo sign-in received. You can close this page.</p>");
-        close(c); return query;
+    const time_t deadline = time(NULL) + seconds;
+    while (!(cancel && atomic_load(cancel)) && time(NULL) < deadline) {
+        struct pollfd ready = {.fd = fd, .events = POLLIN};
+        if (poll(&ready, 1, 500) <= 0) continue;
+        int client = accept(fd, NULL, NULL);
+        if (client < 0) continue;
+        struct timeval limit = {.tv_sec = 5};
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &limit, sizeof limit);
+        char request[16384]; size_t have = 0;   // only the request line is needed
+        while (have < sizeof request - 1 && !memchr(request, '\n', have)) {
+            ssize_t n = read(client, request + have, sizeof request - 1 - have);
+            if (n <= 0) break;
+            have += (size_t)n;
+        }
+        request[have] = 0;
+        char target[16384] = "";
+        NSDictionary<NSString *, NSString *> *query = nil;
+        if (sscanf(request, "GET %16383s HTTP/", target) == 1) {
+            NSURLComponents *url = [NSURLComponents componentsWithString:[@"http://127.0.0.1" stringByAppendingString:@(target)]];
+            NSMutableDictionary *items = [NSMutableDictionary dictionary];
+            for (NSURLQueryItem *item in url.queryItems) items[item.name] = item.value ?: @"";
+            if ([url.path isEqual:@"/callback"] && [items[@"state"] isEqual:state]) query = items;
+        }
+        if (query) nxl_answer(client, 200, "<!doctype html><title>nxnative</title><p>Nextendo sign-in received. You can close this page.</p>");
+        else nxl_answer(client, 404, "");
+        close(client);
+        if (query) return query;
     }
+    return nil;
 }
-// Nextendo's sign-in page for this redirect, state and PKCE verifier
+
+// Nextendo's sign-in page for this redirect, with `state` and the S256 challenge of `verifier`
 __attribute__((unused)) static NSURL *nxl_authorize_url(NSString *redirect, NSString *state, NSString *verifier) {
-    uint8_t digest[CC_SHA256_DIGEST_LENGTH]; NSData *v = [verifier dataUsingEncoding:NSUTF8StringEncoding];
-    CC_SHA256(v.bytes, (CC_LONG)v.length, digest);
-    NSURLComponents *c = [NSURLComponents componentsWithString:kNxAuthorize];
-    c.queryItems = @[[NSURLQueryItem queryItemWithName:@"client_id" value:kNxClientID], [NSURLQueryItem queryItemWithName:@"redirect_uri" value:redirect],
-                     [NSURLQueryItem queryItemWithName:@"response_type" value:@"code"], [NSURLQueryItem queryItemWithName:@"scope" value:kNxScopes],
-                     [NSURLQueryItem queryItemWithName:@"state" value:state], [NSURLQueryItem queryItemWithName:@"code_challenge" value:nxl_b64url([NSData dataWithBytes:digest length:sizeof digest])],
-                     [NSURLQueryItem queryItemWithName:@"code_challenge_method" value:@"S256"]];
-    return c.URL;
+    NSData *plain = [verifier dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *challenge = [NSMutableData dataWithLength:CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(plain.bytes, (CC_LONG)plain.length, challenge.mutableBytes);
+    NSURLComponents *page = [NSURLComponents componentsWithString:kNxAuthorize];
+    NSDictionary<NSString *, NSString *> *parameters = @{@"response_type": @"code", @"client_id": kNxClientID, @"redirect_uri": redirect, @"scope": kNxScopes,
+                                                         @"state": state, @"code_challenge": nxl_b64url(challenge), @"code_challenge_method": @"S256"};
+    NSMutableArray<NSURLQueryItem *> *items = [NSMutableArray array];
+    for (NSString *name in [parameters.allKeys sortedArrayUsingSelector:@selector(compare:)]) [items addObject:[NSURLQueryItem queryItemWithName:name value:parameters[name]]];
+    page.queryItems = items;
+    return page.URL;
 }
-// The redirect's query → the stored sign-in → the game record, which proves the account can get a game token as a game will. nil and a reason when any step fails
+
+// After the redirect: the code becomes the saved sign-in, and a game token is fetched as a game would, to show the account works.
+// nil and the reason when a step fails
 __attribute__((unused)) static NSDictionary *nxl_finish_sign_in(NSDictionary<NSString *, NSString *> *query, NSString *verifier, NSString *redirect, NSString **error) {
     if (!query) { nxl_fail(error, @"no answer from the sign-in page"); return nil; }
     if (query[@"error"]) { nxl_fail(error, [NSString stringWithFormat:@"Nextendo refused the sign-in (%@)", query[@"error"]]); return nil; }
     NSString *code = query[@"code"];
-    if (!code.length) { nxl_fail(error, @"Nextendo sent no sign-in code"); return nil; }
+    if (code.length == 0) { nxl_fail(error, @"Nextendo sent no sign-in code"); return nil; }
     nxl_write_refresh(nil);
-    if (!nxl_token(@{@"grant_type": @"authorization_code", @"client_id": kNxClientID, @"code": code, @"code_verifier": verifier, @"redirect_uri": redirect}, error)) return nil;
+    NSDictionary *grant = @{@"grant_type": @"authorization_code", @"code": code, @"code_verifier": verifier, @"redirect_uri": redirect, @"client_id": kNxClientID};
+    if (!nxl_token(grant, error)) return nil;
     if (!nxl_read_refresh()) { nxl_fail(error, @"Nextendo returned no refresh token, so the sign-in cannot be kept"); return nil; }
     return nxl_game_record(error);
 }
