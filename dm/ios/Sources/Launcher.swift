@@ -98,7 +98,7 @@ private struct NextendoSection: View {
                 }.disabled(busy)
             }
         } header: { Text("Online") } footer: {
-            Text(note.isEmpty ? "Online play goes through Nextendo, a community service. Set Network to Nextendo to use it. The account needs a confirmed e-mail and a linked Discord account." : note)
+            Text(note.isEmpty ? "Online play goes through Nextendo, a community service. Set Network to Nextendo, or to Local wireless and Nextendo, to use it. The account needs a confirmed e-mail and a linked Discord account." : note)
         }
         .onAppear {
             guard dm_nextendo_signed_in() else { return }

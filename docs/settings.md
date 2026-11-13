@@ -103,6 +103,8 @@ On an iPhone, **VPN play** appears below the settings while Network is LAN or Lo
 
 Signing in is all a game needs to go online: the app already carries Nextendo's certificate, so there is nothing to copy onto the phone. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. Under **Online**, **Birthday, if Nextendo has none** is used only when the account gives none.
 
+**Local wireless and Nextendo** (`DM_NETWORK=auto`), also only in a `--nextendo` build, turns on LAN, Local wireless and Nextendo together, and the game picks which one it uses from its own menus. Use it for a game that checks its online service before it opens local wireless play: Super Mario Bros. Wonder shows an error (2162-0001) in **Local wireless** alone, since its online library finds Nextendo off there. VPN play is not offered in this mode.
+
 **Player name** appears below the settings while Network is anything but Offline. It is the name other players see, up to 10 characters. Leave it empty to use your Nextendo username, or Player when you are not signed in. `DM_NICK` in `Documents/env.txt` does the same, and the field then shows it without letting you change it.
 
 ## Controls

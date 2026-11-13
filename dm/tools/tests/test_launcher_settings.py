@@ -106,7 +106,7 @@ class LauncherSettingsTests(unittest.TestCase):
         self.assertEqual((values(plain), plain['DM_NETWORK']['default']), (['offline', 'lan', 'ldn'], 'offline'))
         with patch.dict(os.environ, {'DM_NEXTENDO': '1', 'DM_NETWORK': 'nextendo'}):
             online = build(WONDER, 'nvn')
-        self.assertEqual((values(online), online['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'nextendo'], 'nextendo'))
+        self.assertEqual((values(online), online['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'nextendo', 'auto'], 'nextendo'))
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):
