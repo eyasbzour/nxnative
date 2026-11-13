@@ -67,7 +67,10 @@ int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; }
 uint64_t gate_dispatch(uint64_t ret, uint64_t *registers) { (void)ret; (void)registers; abort(); }
 uint64_t unimpl_c(unsigned index, uint64_t *registers) { (void)index; (void)registers; abort(); }
 void dm_thread_returned(void) { abort(); }
+static int guest_errno;   // the game's own errno (its C library's __errno_location), which a failed socket call sets as Horizon's nn::socket does
+static int *guest_errno_location(void) { return &guest_errno; }
 void *guest_sym(const char *name) {
+    if (!strcmp(name, "__errno_location")) return (void *)guest_errno_location;
     if (strstr(name, "GetAddrInfoEPKcS2_PK8addrinfoPPS3_")) return resolver_abi != 1 ? (void *)1 : NULL;
     if (strstr(name, "GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_")) return resolver_abi != 0 ? (void *)1 : NULL;
     return NULL;
@@ -257,6 +260,8 @@ static void tcp(void) {
 }
 static void errors_and_resolver(void) {
     CHECK(SOCKET(28, 2, 17) < 0 && dm_net_errno() == 97, "IPv6 rejected with correct family error");
+    guest_errno = 0; CHECK(SOCKET(28, 2, 17) < 0 && guest_errno == 97, "a failed socket call sets the game's own errno, as Horizon's errno is the C library's");
+    guest_errno = 115; CHECK(GET(int (*)(void), "_ZN2nn6socket12GetLastErrnoEv")() == 115, "GetLastErrno reads the game's errno, as detail::GetLastErrno does");
     CHECK(SOCKET(2, 3, 0) < 0 && dm_net_errno() == 94, "raw socket rejected");
     CHECK(SOCKET(2, 1, 17) < 0 && dm_net_errno() == 93, "protocol mismatch rejected");
     int guest = SOCKET(2, 2, 17); address a = addr(htonl(0x7f000001), 0);

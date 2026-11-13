@@ -51,9 +51,18 @@ static inline void dmnd_efd_call(uint16_t op, int32_t a0, int32_t a1, int32_t re
     if (n < DMND_FIRST_EVENTFD) LOG("net-diag first-eventfd #%u op=%u a0=%d a1=%d res=%d err=%d", n, op, a0, a1, res, err);
     dmnd_record(DMND_EVENTFD, op, a0, a1, res, err, 0, __builtin_return_address(0), 0);
 }
+// The game's errno. Super Mario Bros. Wonder's gRPC reads errno after connect (main+0xb61e38 and tcp_client_posix.cc:299): it had set 97 itself when it
+// left IPv6 (main+0xb61480), and with only the host's copy set it took the non-blocking connect's EINPROGRESS for that 97 and gave the address up
+static int *(*_Atomic g_guest_errno)(void); static _Atomic int g_guest_errno_looked;
+static int *guest_errno_location(void) {
+    if (!atomic_load(&g_guest_errno_looked)) { g_guest_errno = (int *(*)(void))guest_sym("__errno_location"); atomic_store(&g_guest_errno_looked, 1); }
+    int *(*loc)(void) = g_guest_errno; return loc ? loc() : NULL;
+}
+long dm_net_guest_errno(long r) { if (r < 0) { int *e = guest_errno_location(); if (e) *e = dm_net_errno(); } return r; }
+int dm_net_guest_errno_get(void) { int *e = guest_errno_location(); return e ? *e : dm_net_errno(); }
 static inline int32_t dmnd_sock(int32_t r, uint16_t op, int32_t a0, int32_t a1) {
     dmnd_record(DMND_SOCKET, op, a0, a1, r, r < 0 ? dm_net_errno() : 0, 0, __builtin_return_address(0), 0);
-    return r;
+    return (int32_t)dm_net_guest_errno(r);
 }
 #define SKF(m, cname, ...) HLE_FORCE(m, "socket transport: unavailable by default, translated Darwin sockets in explicit Mac LAN mode", int, cname, __VA_ARGS__)
 #define SKW(m, cname, ...) HLE_FORCE_WAIT(m, "blocking socket transport with a pausable guest context", int, cname, __VA_ARGS__)
@@ -205,18 +214,18 @@ SKF("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", h_sk_GetSockName, int s, vo
 SKF("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", h_sk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dmnd_sock(dm_net_sockopt(s, l, o, v, n, 0),DMND_OP_SOCKOPT,0,0); }
 SKF("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", h_sk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return dmnd_sock(dm_net_sockopt(s, l, o, (void *)v, &n, 1),DMND_OP_SOCKOPT,0,0); }
 SKF("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", h_sk_Fcntl, int s, int c, int flags) { return dmnd_sock(dm_net_fcntl(s, c, flags),DMND_OP_FCNTL,0,0); }
-SKW("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
-SKW("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_sk_select(n, r, w, e, t); }
+SKW("_ZN2nn6socket4PollEPNS0_6PollFdEmi", h_sk_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
+SKW("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", h_sk_Select, int n, void *r, void *w, void *e, void *t) { return dm_net_guest_errno(dm_sk_select(n, r, w, e, t)); }
 // SDK 21 overloads Star Fox imports: plain sockaddr, the ShutdownMethod enum, Read / Write and a name lookup without options; SetAllocator keeps nothing, as no session is created. All go through the transport as their SockAddr forms do (the overloads only differ in the C type they spell)
 SKF("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", h_sk_GetPeerName21, int s, void *a, unsigned *n) { return dmnd_sock(dm_net_name(s, a, n, 1),DMND_OP_NAME,0,0); }
 SKF("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", h_sk_Shutdown21, int s, int how) { return dmnd_sock(dm_net_shutdown(s, how),DMND_OP_SOCKET,0,0); }
-HLE_FORCE_WAIT("_ZN2nn6socket4ReadEiPvm", "socket transport, offline by default", long, h_sk_Read, int s, void *b, unsigned long n) { return dm_net_recv(s, b, n, 0, NULL, NULL); }
-HLE_FORCE_WAIT("_ZN2nn6socket5WriteEiPKvm", "socket transport, offline by default", long, h_sk_Write, int s, const void *b, unsigned long n) { return dm_net_send(s, b, n, 0, NULL, 0); }
+HLE_FORCE_WAIT("_ZN2nn6socket4ReadEiPvm", "socket transport, offline by default", long, h_sk_Read, int s, void *b, unsigned long n) { return dm_net_guest_errno(dm_net_recv(s, b, n, 0, NULL, NULL)); }
+HLE_FORCE_WAIT("_ZN2nn6socket5WriteEiPKvm", "socket transport, offline by default", long, h_sk_Write, int s, const void *b, unsigned long n) { return dm_net_guest_errno(dm_net_send(s, b, n, 0, NULL, 0)); }
 HLE_FORCE_WAIT("_ZN2nn6socket16GetHostEntByNameEPKc", "name resolution, offline by default", void *, h_sk_GetHostEnt21, const char *n) { return dm_net_gethostbyname(n); }
 HLE_FORCE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", "socket library allocator; no session is created, ignored", void, h_sk_SetAlloc, void *r) { (void)r; }
 // The C library's poll (SDK 21's nnmusl, Star Fox): it needs the socket state of the initialization cut above and fails with EFAULT without it, which the game's loop takes as fatal, so it goes
 // to the host's Poll too
-SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
+SKF("poll", h_libc_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
 // EventFd works in every mode. Offline it is the counter table above (a garbage collector of the game's own wakes its pollers, Ocarina of Time at startup). In a network mode it is a
 // descriptor of the transport's socket table (dm_net_eventfd, hle_net_backend.c), numbered with the sockets, so the transport's Poll and Select see both: gRPC polls its sockets and
 // its wakeup descriptor together (nn::npln). A blocking read waits as the host's other waits do: dm_guest_cond_wait_ns offline, the transport's bracketed host waits otherwise
@@ -234,9 +243,9 @@ static int sk_res_option(const void *o, int key, int set) {
 }
 SKF("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", h_sk_ResGet, void *o, int k) { (void)o; return sk_res_option(NULL, k, 0); }
 SKF("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", h_sk_ResSet, const void *o) { return sk_res_option(o, 0, 1); }
-HLE_FORCE_WAIT("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_recv(s, b, n, f, NULL, NULL); }
-HLE_FORCE_WAIT("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "socket transport, offline by default", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_net_recv(s, b, n, f, a, al); }
-HLE_FORCE_WAIT("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return dm_net_send(s, b, n, f, NULL, 0); }
+HLE_FORCE_WAIT("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_guest_errno(dm_net_recv(s, b, n, f, NULL, NULL)); }
+HLE_FORCE_WAIT("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", "socket transport, offline by default", long, h_sk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return dm_net_guest_errno(dm_net_recv(s, b, n, f, a, al)); }
+HLE_FORCE_WAIT("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", "socket transport, offline by default", long, h_sk_Send, int s, const void *b, unsigned long n, int f) { return dm_net_guest_errno(dm_net_send(s, b, n, f, NULL, 0)); }
 HLE_FORCE_WAIT("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "name resolution (cut): EAI_FAIL", int, h_sk_GetAddrInfo, const char *h, const char *s, const void *hint, void **res) {
     return dm_net_getaddrinfo(h, s, hint, res);
 }
@@ -253,14 +262,14 @@ SKF("nnsocketGetSockName", h_nsk_GetSockName, int s, void *a, unsigned *n) { ret
 SKF("nnsocketGetSockOpt", h_nsk_GetSockOpt, int s, int l, int o, void *v, unsigned *n) { return dmnd_sock(dm_net_sockopt(s, l, o, v, n, 0),DMND_OP_SOCKOPT,0,0); }
 SKF("nnsocketSetSockOpt", h_nsk_SetSockOpt, int s, int l, int o, const void *v, unsigned n) { return dmnd_sock(dm_net_sockopt(s, l, o, (void *)v, &n, 1),DMND_OP_SOCKOPT,0,0); }
 SKF("nnsocketFcntl", h_nsk_Fcntl, int s, int c, int flags) { return dmnd_sock(dm_net_fcntl(s, c, flags),DMND_OP_FCNTL,0,0); }
-SKW("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_sk_poll(f, n, t); }
+SKW("nnsocketPoll", h_nsk_Poll, void *f, unsigned long n, int t) { return dm_net_guest_errno(dm_sk_poll(f, n, t)); }
 HLE_FORCE_WAIT("nnsocketGetHostByNameCancel", "real IPv4 resolution with an independent cancellation ID", void *, h_nsk_GetHostCancel, const char *name, uint32_t id) { return dm_net_gethostbyname_cancel(name, id); }
 HLE_FORCE_WAIT("_ZN2nn6socket13GetHostByNameEPKci", "real IPv4 resolution with an independent cancellation ID", void *, h_sk_GetHostCancel, const char *name, uint32_t id) { return dm_net_gethostbyname_cancel(name, id); }
 HLE_FORCE("nnsocketRequestCancelHandle", "allocate a nonzero resolver cancellation identity, not a socket", uint32_t, h_nsk_RequestCancel, void) { return dm_net_request_cancel_handle(); }
 HLE_FORCE("_ZN2nn6socket19RequestCancelHandleEv", "allocate a nonzero resolver cancellation identity, not a socket", uint32_t, h_sk_RequestCancel, void) { return dm_net_request_cancel_handle(); }
-SKW("nnsocketCancel", h_nsk_Cancel, uint32_t id) { return dm_net_cancel(id); }
-SKW("_ZN2nn6socket6CancelEi", h_sk_Cancel, uint32_t id) { return dm_net_cancel(id); }
+SKW("nnsocketCancel", h_nsk_Cancel, uint32_t id) { return dm_net_guest_errno(dm_net_cancel(id)); }
+SKW("_ZN2nn6socket6CancelEi", h_sk_Cancel, uint32_t id) { return dm_net_guest_errno(dm_net_cancel(id)); }
 SKF("nnsocketResolverGetOption", h_nsk_ResGet, void *o, int k) { (void)o; return sk_res_option(NULL, k, 0); }
 SKF("nnsocketResolverSetOption", h_nsk_ResSet, const void *o) { return sk_res_option(o, 0, 1); }
-HLE_FORCE_WAIT("nnsocketRecv", "socket transport, offline by default", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_recv(s, b, n, f, NULL, NULL); }
+HLE_FORCE_WAIT("nnsocketRecv", "socket transport, offline by default", long, h_nsk_Recv, int s, void *b, unsigned long n, int f) { return dm_net_guest_errno(dm_net_recv(s, b, n, f, NULL, NULL)); }
 // ---------- ssl: hle_ssl.c (the client TLS service, offline and online) ----------
