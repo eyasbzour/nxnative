@@ -39,7 +39,7 @@ bcat-tools:
 bcat: bcat-fixtures bcat-launch bcat-tools
 bcat-sanitize:
 	$(MAKE) B=build/bcat-asan SAN="-fsanitize=address,undefined -fno-omit-frame-pointer" bcat
-run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
+run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
 	$(B)/t_language
 	$(B)/t_heap_size
 	$(B)/t_touch
@@ -53,6 +53,7 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
 	$(B)/t_audio
 	$(B)/t_output_stream
+	$(B)/t_mii
 	$(B)/t_audio_spsc
 	$(B)/t_audio_stats
 	$(B)/t_fpslock
@@ -195,6 +196,8 @@ save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_mii: t_mii.c ../hle_mii.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_mii.c
 $(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c -framework AudioToolbox
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
