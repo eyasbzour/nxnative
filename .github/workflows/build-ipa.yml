@@ -51,6 +51,9 @@ env:
   # toolchain check and the build, builds with it anyway (the merge of main into this branch
   # keeps dropping a step-level override, so it lives at the top level)
   DM_ALLOW_OTHER_METAL: "1"
+  # The Nextendo application this fork's apps sign in as (dm/host/nextendo_login_apple.inc): Mush8's public client, borrowed until the fork
+  # registers its own at nextendo.network/developers
+  DM_NEXTENDO_CLIENT_ID: nxc_PZv-XFn79sLo
 
 permissions:
   contents: write   # the job publishes the release with the IPA parts

@@ -3433,7 +3433,9 @@ def main(args=None):
         host, font = (first['host'], first['font']) if first else mac_host(py, repo, work, env, logs, g)
         parts = {'font': font}
         cmd = mac_run(work, game, patched, host, font, ios, aoc, gfx, lang, env, logs, g, env_file, partial=seen_shaders, parts=parts, jit=jit)
-        if routes: cmd = cmd.replace(' && ', f' && DM_NETWORK=nextendo DM_NEXTENDO_ROUTES={shlex.quote(str(routes))} ', 1)
+        if routes:   # the Nextendo application the Mac signs in as comes from the build's environment (dm/host/nextendo_login_apple.inc)
+            client = os.environ.get('DM_NEXTENDO_CLIENT_ID', '')
+            cmd = cmd.replace(' && ', f' && DM_NETWORK=nextendo DM_NEXTENDO_ROUTES={shlex.quote(str(routes))} ' + (f'DM_NEXTENDO_CLIENT_ID={shlex.quote(client)} ' if client else ''), 1)
         rmtree(work / 'tmp')
         if getattr(args, 'in_programs', False): return parts
         programs = None if PROGRAM_INDEX else mac_programs(args, g, parts)

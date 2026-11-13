@@ -3,6 +3,7 @@
 //   nextendo_login sign-in    shows Nextendo's sign-in page in the browser and saves the sign-in on this Mac
 //   nextendo_login status     fetches a game token as a game would and names the account
 //   nextendo_login sign-out   deletes the saved sign-in
+// DM_NEXTENDO_CLIENT_ID names the Nextendo application it signs in as (nextendo_login_apple.inc).
 // Build: make -C dm/host nextendo_login. It prints the account's name and PID, never a token. The iPhone app signs in on its
 // settings screen instead (dm/ios/Sources/NextendoSignIn.m).
 #import <AppKit/AppKit.h>
@@ -19,6 +20,7 @@ static int print_result(NSDictionary *record, NSString *why) {
 }
 
 static int sign_in(void) {
+    if (!nxl_client_id()) { fprintf(stderr, "nextendo_login: %s\n", kNxNoClient.UTF8String); return 1; }
     NSString *verifier = nxl_random_urlsafe(32), *state = nxl_random_urlsafe(16);
     if (!verifier || !state) { fputs("nextendo_login: no random bytes\n", stderr); return 1; }
     uint16_t port = 0;

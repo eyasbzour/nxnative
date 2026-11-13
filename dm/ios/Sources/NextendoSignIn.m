@@ -51,6 +51,7 @@ void dm_nextendo_sign_in(DmNextendoDone done) {
     static ASWebAuthenticationSession *current;
     static DmNextendoPresenter *presenter;
     static _Atomic int closed_by_player;
+    if (!nxl_client_id()) { report(done, nil, kNxNoClient); return; }
     NSString *verifier = nxl_random_urlsafe(32), *state = nxl_random_urlsafe(16);
     uint16_t port = 0;
     int listener = verifier && state ? nxl_listen_loopback(&port) : -1;
