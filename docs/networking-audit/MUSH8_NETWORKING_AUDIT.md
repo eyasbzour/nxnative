@@ -103,7 +103,7 @@ nxhost has `bsd.rs`, `nifm.rs`, `vnet.rs`, `dnssd.rs` and no `nextendo.rs`/`ssl.
 
 ## Reuse decision (2026-11-10)
 
-- Reusing Mush8 code is allowed. The fork sends no PRs to seedds, so derived code can go on any fork branch, with GPL-3.0 headers on the derived files.
+- Mush8 is a reference for facts only. The sign-in once derived from it was rewritten under MIT on 2026-11-14 (`IMPLEMENTATION_PLAN.md`).
 - Mush8 is now the second reference. The MIT stack in seedds #961 (RobiiAragon) already covers TLS, routing, NSD and the account id token in C and Objective-C, so it comes first (`UPSTREAM_NETWORKING_PRS.md`).
 - What Mush8 still adds: its single host/virtual descriptor table (`bsd.rs` `FDS`) as the model for one socket/EventFd table, and its hostname redirect list to cross-check #961's routes.
 - No Rust FFI: it would add a toolchain to the iOS build for pieces #961 already has.

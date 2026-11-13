@@ -4,7 +4,7 @@ Where each networking piece comes from. Updated 2026-11-10 after the survey in `
 
 Decisions:
 - **Take #961 / #1283**: merge the MIT code from the open seedds PRs.
-- **Port from Mush8**: copy or translate Mush8's Rust into C, with GPL-3.0 headers on the derived files. The fork sends no PRs to seedds, so this can go on any fork branch.
+- **Learn from Mush8**: take facts from it (what Nextendo expects, what a game calls) and write the C ourselves under MIT. Since 2026-11-14 no Mush8-derived code is in the fork (`IMPLEMENTATION_PLAN.md`).
 - **Keep nxnative**: keep the current implementation and adapt its interfaces.
 - **Gap**: nobody has built it yet.
 

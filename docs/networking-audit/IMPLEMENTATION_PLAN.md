@@ -20,6 +20,8 @@ Goal: Nextendo online play in nxnative, with Super Mario Bros. Wonder 1.2.1 frie
 
 Licensing decision (2026-11-10): this work stays in the `eyasbzour/nxnative` fork, and no PRs go to seedds. Mush8 code can be ported, reused or translated wherever it helps. Files derived from Mush8 carry GPL-3.0 headers. A binary that contains them is GPL-3.0 as a whole, so each IPA build gets a tag pointing at its source in the public fork.
 
+Updated 2026-11-14: the fork now holds no Mush8-derived code. The Nextendo sign-in (`dm/host/nextendo_login_apple.inc`, `hle_nextendo_login_apple.m`, `dm/ios/Sources/NextendoSignIn.{h,m}`, `dm/tools/nextendo_login.m`) was rewritten under MIT from Nextendo's public OAuth interface, so the online work can go to seedds. Mush8 stays a reference for facts (endpoints, token shapes, which calls a game makes), not a source of code.
+
 ## Architecture
 
 ```text
@@ -91,7 +93,7 @@ No PRs go to seedds. The fork keeps merging seedds `main` and the RobiiAragon PR
 |---|---|
 | #961 is a draft, 288 commits behind main, and unvalidated on its current head | Merge it on our branch and validate with our CI before building on it. Re-sync with RobiiAragon's head when it moves. |
 | No NPLN game has gone online on any of these stacks | Stage 3 trace before writing Wonder-specific code. |
-| A GPL-3.0 binary ships without its source | Tag the source of every IPA build in the public fork; keep GPL-3.0 headers on Mush8-derived files. |
+| Mush8 code comes back into the fork | Write fixes from facts (Nextendo's interfaces, the game's calls), not by translating Mush8's code; every file stays MIT. |
 | Offline, LAN or LDN titles regress | Nothing changes without configuration. Full CI after each stage. |
 | Guest deadlock or spin | Keep bounded waits and the `dm_guest_*` integration. TSan coverage. |
 | Insecure TLS shortcuts | #961's scoped trust only, exact leaf match, no system trust store changes. |
