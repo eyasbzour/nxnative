@@ -14,7 +14,7 @@ Status: **done** (in the fork), **verify** (written, waiting for a device log), 
 | Saved sign-in | Keychain | Keychain | private file (0600) in the app container | done; Keychain is optional |
 | Game token (`/api/nex-token`, nx2) | yes | yes | yes | done |
 | Why an account may not play (`/api/online-status`) | launcher | not checked | sign-in error text | done |
-| Own registered OAuth client ID | its own | user enters one | Mush8's, borrowed | todo: register one at nextendo.network/developers |
+| Own registered OAuth client ID | its own | user enters one | a build setting (`DM_NEXTENDO_CLIENT_ID`); the fork's workflow sets Mush8's, borrowed | todo: register one at nextendo.network/developers |
 | BaaS id token with the `nnex` proof | yes | yes (#961) | yes | done (Wonder online works) |
 | `GetNetworkServiceAccountId` = Nextendo PID | yes | yes | yes | done |
 | Nickname, country, birthday from `/api/me` | nickname, country | country (#961) | all three | done |
@@ -52,7 +52,7 @@ Status: **done** (in the fork), **verify** (written, waiting for a device log), 
 | NPLN (gRPC) games, e.g. Wonder | n/a | yes | yes | done: sign-in, rooms, search |
 | NEX games, e.g. Mario Kart | yes | yes | all calls covered | verify on a phone |
 | Game patch from Nextendo's catalog | n/a | yes | yes (Wonder has one; Mario Kart needs none) | done |
-| Mario Kart menu sites Mush8 patches | its own menu mod | n/a | no | not needed for a stock game |
+| Mario Kart menu sites Mush8 patches (`main+0x4d8a04`, `0x4da738`) | its own menu mod | n/a | no | todo on a `kart` branch: check them in a stock 4.0.1 `main`; if needed, our own patch in the game's `patches.py` |
 | Two players in one room (Pia NAT check, then direct UDP or relay) | yes | not checked | not tested | verify |
 | Backgrounding the app | not checked | not checked | sockets drop; the game shows 2321-4992 | iOS limit |
 
