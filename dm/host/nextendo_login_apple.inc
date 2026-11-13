@@ -30,6 +30,7 @@ static NSString *const kNxScopes __attribute__((unused)) = @"identity friends ga
 static NSString *const kNxAuthorize __attribute__((unused)) = @"https://nextendo.network/oauth/authorize";
 static NSString *const kNxTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/oauth/token";
 static NSString *const kNxGameTokenEndpoint __attribute__((unused)) = @"https://nextendo.network/api/nex-token";
+static NSString *const kNxOnlineStatusEndpoint __attribute__((unused)) = @"https://nextendo.network/api/online-status";
 // The redirect is http://127.0.0.1:<port>/callback. That client was registered with this port, so it is tried first; Nextendo also takes
 // other loopback ports, which are used when it is busy.
 static const uint16_t kNxCallbackPort __attribute__((unused)) = 47823;
@@ -187,6 +188,25 @@ __attribute__((unused)) static NSDictionary *nxl_record(NSString *token, NSTimeI
              @"scopes": [kNxScopes componentsSeparatedByString:@" "]};
 }
 
+// /api/online-status says whether this account may play online now: {"allow": true}, or {"allow": false, "reason": ...}. When it refuses,
+// the reason in words for the player; nil when it allows, cannot be asked, or gives no answer
+__attribute__((unused)) static NSString *nxl_online_refusal(NSString *access) {
+    NSMutableURLRequest *get = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kNxOnlineStatusEndpoint]
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8];
+    [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
+    NSDictionary *answer = nxl_send(get, NULL);
+    if (![answer[@"allow"] isEqual:@NO]) return nil;
+    NSString *reason = [answer[@"reason"] isKindOfClass:NSString.class] ? answer[@"reason"] : @"";
+    NSDictionary<NSString *, NSString *> *words = @{
+        @"discord_unlinked": @"link a Discord account on your nextendo.network account page",
+        @"unverified": @"verify the account's e-mail address with the link Nextendo sent you",
+        @"elsewhere": @"this account is online on another device; leave online play there first",
+        @"disabled": @"this account is disabled",
+        @"unknown": @"Nextendo does not know this account; sign out and sign in again"};
+    NSString *what = words[reason] ?: [NSString stringWithFormat:@"Nextendo gave the reason \"%@\"", reason.length ? reason : @"none"];
+    return [@"Nextendo does not allow online play yet: " stringByAppendingString:what];
+}
+
 // From the saved sign-in to a game token's record: refresh grant, then /api/nex-token. nil and the reason when a step fails
 __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
     NSString *refresh = nxl_read_refresh();
@@ -204,10 +224,11 @@ __attribute__((unused)) static NSDictionary *nxl_game_record(NSString **error) {
                                                        cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:kNxTimeout];
     [get setValue:[NSString stringWithFormat:@"Bearer %@", access] forHTTPHeaderField:@"Authorization"];
     NSDictionary *answer = nxl_send(get, error);
-    if (!answer) return nil;
     NSString *token = answer[@"nex_token"];
     if (![token isKindOfClass:NSString.class] || token.length == 0) {
-        nxl_fail(error, @"Nextendo issued no game token for this account (Nextendo asks for a verified e-mail address and a Discord link before online play)");
+        NSString *reason = nxl_online_refusal(access);
+        if (reason) nxl_fail(error, reason);
+        else if (answer) nxl_fail(error, @"Nextendo issued no game token for this account (Nextendo asks for a verified e-mail address and a Discord link before online play)");
         return nil;
     }
     return nxl_record(token, NSDate.date.timeIntervalSince1970, error);

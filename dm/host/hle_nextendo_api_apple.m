@@ -199,6 +199,16 @@ uint32_t dm_nextendo_api_request(const char *resource, const uint8_t *body, size
     [transfer.lock lock];
     BOOL valid = !transfer.failed && transfer.status >= 200 && transfer.status < 300 && transfer.data.length <= capacity;
     if (valid) { memcpy(output,transfer.data.bytes,transfer.data.length); *output_size = transfer.data.length; }
+    NSInteger status = transfer.status;
     [transfer.lock unlock]; [session finishTasksAndInvalidate];
+    // A refused request is logged once per resource and status (no body, no token), so a device log shows whether Nextendo takes this
+    // bearer for the resource: 401 or 403 here would mean it wants another kind of token
+    if (!valid) {
+        static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER; static NSMutableSet<NSString *> *seen;
+        NSString *key = [NSString stringWithFormat:@"%@ %ld", resourceName, (long)status];
+        pthread_mutex_lock(&seen_lock); if (!seen) seen = [NSMutableSet new]; BOOL first = ![seen containsObject:key]; [seen addObject:key]; pthread_mutex_unlock(&seen_lock);
+        NSString *what = status ? [NSString stringWithFormat:@"HTTP %ld", (long)status] : @"nothing (no connection, or an oversized answer)";
+        if (first) fprintf(stderr, "[dm] [RED] nextendo: /api/%s answered %s\n", resource, what.UTF8String);
+    }
     return valid ? 0 : DM_ACCOUNT_FAIL;
 } }
