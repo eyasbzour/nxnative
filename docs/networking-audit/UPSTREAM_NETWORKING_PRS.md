@@ -1,6 +1,6 @@
 # Networking work already open against seedds/nxnative
 
-Surveyed 2026-11-10 against seedds `main` @ `2f131edc`. None of these PRs is merged. The upstream repository and every PR listed here are MIT. We merge them into the fork only; no PRs go back to seedds.
+Surveyed 2026-11-10 against seedds `main` @ `2f131edc`. None of these PRs is merged. The upstream repository and every PR listed here are MIT. We merge them into the fork. On 2026-11-10 nothing was meant to go back to seedds; since 2026-11-12 the generic fixes do, in #2589.
 
 ## The online stack: RobiiAragon (#846, #953, #956, #961)
 
@@ -50,5 +50,5 @@ A trial `git merge-tree` of #961 (`4c7e43f1`) into `integration/ldn-846` (`2f86f
 ## What this changes for the plan
 
 1. Base the online work on RobiiAragon's MIT stack instead of porting Mush8. It already covers TLS, routing, account tokens and NSD for NEX games, and it is written for this code base.
-2. Wonder is an NPLN title, and none of these PRs has run an NPLN game online. NPLN uses gRPC, which wakes its pollers with EventFd while sockets are in the same Poll. Main's EventFd still fails whenever networking is on (`hle_net.c` `h_sk_EventFd`). That shared socket/EventFd descriptor table is the gap nobody has filled, and #1283 is the best starting point for it.
-3. Mush8 (GPL-3.0) is still fair game to port or reuse, mainly its single host/virtual descriptor table and its Nextendo DNS redirect, and anything else that fills a gap #961 leaves.
+2. Wonder is an NPLN title, and none of these PRs has run an NPLN game online. NPLN uses gRPC, which wakes its pollers with EventFd while sockets are in the same Poll. Main's EventFd still fails whenever networking is on (`hle_net.c` `h_sk_EventFd`). That shared socket/EventFd descriptor table is the gap nobody has filled, and #1283 is the best starting point for it. Filled since in #2589: in a network mode an event descriptor is a slot of the transport's socket table, and Wonder's online menu works.
+3. Mush8 (GPL-3.0) is a reference for facts only (since 2026-11-12): what Nextendo expects and what a game calls. Anything it does that we need is written under MIT from that behaviour, not ported.

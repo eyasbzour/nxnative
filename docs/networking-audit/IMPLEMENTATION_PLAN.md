@@ -18,7 +18,7 @@ Goal: Nextendo online play in nxnative, with Super Mario Bros. Wonder 1.2.1 frie
 | c22dev/mush8 | `9322831c` | GPL-3.0 | Second reference: single host/virtual descriptor table, Nextendo DNS redirect. |
 | c22dev/nxhost | `1654434f` | GPL-3.0 | Older substrate reference. |
 
-Licensing decision (2026-11-10): this work stays in the `eyasbzour/nxnative` fork, and no PRs go to seedds. Mush8 code can be ported, reused or translated wherever it helps. Files derived from Mush8 carry GPL-3.0 headers. A binary that contains them is GPL-3.0 as a whole, so each IPA build gets a tag pointing at its source in the public fork.
+Licensing decision (2026-11-10, replaced by the update below): this work stays in the `eyasbzour/nxnative` fork, and no PRs go to seedds. Mush8 code can be ported, reused or translated wherever it helps. Files derived from Mush8 carry GPL-3.0 headers. A binary that contains them is GPL-3.0 as a whole, so each IPA build gets a tag pointing at its source in the public fork.
 
 Updated 2026-11-14: the fork now holds no Mush8-derived code. The Nextendo sign-in (`dm/host/nextendo_login_apple.inc`, `hle_nextendo_login_apple.m`, `dm/ios/Sources/NextendoSignIn.{h,m}`, `dm/tools/nextendo_login.m`) was rewritten under MIT from Nextendo's public OAuth interface, so the online work can go to seedds. Mush8 stays a reference for facts (endpoints, token shapes, which calls a game makes), not a source of code.
 
