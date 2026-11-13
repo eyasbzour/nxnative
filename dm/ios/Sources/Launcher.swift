@@ -198,6 +198,8 @@ private struct LauncherView: View {
     @AppStorage("vpnPlay.on") private var vpnOn = false
     @AppStorage("vpnPlay.host") private var vpnHost = ""
 
+    @AppStorage(padMapKey) private var padMap = ""
+    private var padMapFixed: Bool { m.fixed.contains("DM_PAD_MAP") }
     @AppStorage(playerNameKey) private var playerName = ""
     private var nameFixed: Bool { m.fixed.contains("DM_NICK") }
     private var nameShown: Bool { ["lan", "ldn", "nextendo", "auto"].contains(m.values["DM_NETWORK"] ?? "") }
@@ -233,6 +235,7 @@ private struct LauncherView: View {
                             }
                         }
                     }
+                    ButtonMappingSection(fixed: padMapFixed)
                     if vpnShown {
                         VpnSection(on: vpnFixed ? .constant(getenv("DM_NET_VPN").map { String(cString: $0) == "1" } ?? false) : $vpnOn,
                                    host: vpnFixed ? .constant(getenv("DM_NET_DISCOVERY_PEER").map { String(cString: $0) } ?? "") : $vpnHost, fixed: vpnFixed)
@@ -334,7 +337,16 @@ private struct LauncherView: View {
         applyVpn()
         applyNextendoProfile()
         applyPlayerName()
+        applyPadMap()
         play()
+    }
+
+    /// Button mapping (ButtonMappingSection, LauncherRow.swift): the buttons the player changed, for DmGamepad.m's controllers; what an env file or the launch set stays,
+    /// and DM_SAVED_CHOICES=0 leaves the saved choices out as for the rows
+    private func applyPadMap() {
+        let map = padMapText(padMapParse(padMap))
+        guard !padMapFixed, !m.ignoreSaved, !map.isEmpty else { return }
+        setenv("DM_PAD_MAP", map, 1); fputs("launcher: DM_PAD_MAP=\(map)\n", stderr)
     }
 
     /// The typed player name (PlayerNameSection), while Network is not offline; what an env file or the launch set stays, and an empty field leaves the game's default

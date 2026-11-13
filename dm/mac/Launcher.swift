@@ -139,6 +139,7 @@ struct LauncherView: View {
             .padding([.horizontal, .top], 20)
             Form {
                 settingSections(basic: true)
+                ButtonMappingSection(fixed: m.fixed.contains("DM_PAD_MAP"))   // saved as launcher.DM_PAD_MAP, which launcher.c applies (saved_control)
                 CloudSavesSection()
                 Section {
                     DisclosureGroup("Advanced settings", isExpanded: $advanced) {}

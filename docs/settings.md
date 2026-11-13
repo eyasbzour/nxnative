@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
 
 - [Tested defaults](#tested-defaults)
 - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter), [Network](#network)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Controls size](#controls-size), [Controls opacity](#controls-opacity), [A/B buttons](#ab-buttons), [Touch gamepad as its own player](#touch-gamepad-as-its-own-player), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Controls size](#controls-size), [Controls opacity](#controls-opacity), [A/B buttons](#ab-buttons), [Touch gamepad as its own player](#touch-gamepad-as-its-own-player), [Button mapping](#button-mapping), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -126,6 +126,10 @@ How solid the on-screen controls are, from 30 % to 100 % (100 % by default), the
 ### Touch gamepad as its own player
 
 For two people on one phone. Off (the default), the on-screen gamepad plays as player 1 and hides while a controller is connected, and the first controller is player 1 too. On, the on-screen gamepad is player 1 on its own and stays on screen, and each connected controller is a player of its own from player 2 on. In a game that asks players to join (Super Mario 3D World), player 2 joins with the controller. Only on the iPhone.
+
+### Button mapping
+
+Under **Controller buttons**, pick what each button of a connected controller sends to the game: swap A and B, put ZR on R, or have a button send nothing. Only the buttons you change are kept, and **Reset buttons** puts them all back. The on-screen controls and the Mac keyboard keep their own buttons. The section is on the iPhone and iPad settings screen and in the Mac settings window. It is saved as `DM_PAD_MAP`, so a `DM_PAD_MAP` line in `env.txt` wins over it.
 
 ### Game rumble
 

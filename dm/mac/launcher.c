@@ -7,7 +7,8 @@
 // replaces a variable already set), as the iOS app reads Documents/env.txt and dm/env.txt. Then the player's saved choices: launcher.<VAR> strings in the app's preferences domain (its bundle ID), which a
 // front end or a settings window writes, each checked against the bundle's settings (Info.plist DMSettings, from launcher.json) and used only for a variable still unset; DM_SAVED_CHOICES=0 ignores them.
 // DM_KEYMAP and DM_PAD_MAP are saved choices too (launcher.DM_KEYMAP, launcher.DM_PAD_MAP) but no launcher.json rows, so DMSettings cannot check them: the host's own parser does (dm/host/input_map.h,
-// input_map_valid), and a value it would not take whole is ignored. They are read whether or not the settings window ran, since the window does not offer them.
+// input_map_valid), and a value it would not take whole is ignored. They are read whether or not the settings window ran: the window's Button mapping
+// (LauncherRow.swift ButtonMappingSection) writes launcher.DM_PAD_MAP, and nothing writes launcher.DM_KEYMAP but a front end or the defaults tool.
 // So the order is: the launch environment, the player's env.txt, the bundle's, saved choices, the host's tested defaults (docs/frontends.md, Saved choices).
 // Before the host starts, the settings window (dm/mac/Launcher.swift dm_mac_launcher, linked in by pack_app.py) runs in this process and puts the player's settings into the environment; it keeps
 // what the launch environment and the env files set (DM_ENV_LAUNCH_KEYS, DM_ENV_FILE_KEYS). DM_LAUNCHER=0 or --no-launcher (open <app> --args --no-launcher) starts the game without the window,
