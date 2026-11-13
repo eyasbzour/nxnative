@@ -153,6 +153,9 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.game) return;
     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
+    // Metal reads MTL_HUD_ENABLED once, at that device: set whatever the launcher chose, so the in-game menu's Performance HUD can show it later. The game layer's
+    // developerHUDProperties (mode default or disabled: viewDidLoad, dm_setting_live) decide whether it is on screen. An env file's MTL_HUD_ENABLED=0 stays
+    setenv("MTL_HUD_ENABLED", "1", 0); setenv("MTL_HUD_HIDE_METALFX_METRICS", "1", 0);
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
     {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
@@ -172,7 +175,9 @@ static void launcher_done(void) { [g_root startGame]; }
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
-    if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+    BOOL hud = getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"));   // Apple's HUD over the game: frame rate, frame and GPU time, memory; off is mode disabled, since MTL_HUD_ENABLED is always set
+    g_layer.developerHUDProperties = @{@"mode": hud ? @"default" : @"disabled"};
+    if (hud) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
     dm_haptics_apple_init();
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -279,6 +284,10 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
 // dock (the operation mode change notification); while a TV shows the picture the game stays docked, and the choice applies when the TV is unplugged
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;
+    if (!strcmp(env, "DM_METAL_HUD")) {   // the layer's HUD mode (startGame keeps MTL_HUD_ENABLED set for this)
+        if (value) { int on = atoi(value) != 0; g_layer.developerHUDProperties = @{@"mode": on ? @"default" : @"disabled"}; LOG("front end: Metal performance HUD %s (in-game menu)", on ? "on" : "off"); }
+        return true;
+    }
     if (!strcmp(env, "DM_PICTURE_FIT")) {
         if (value) { g_root.fill = dm_picture_fill(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", g_root.fill ? "Fill" : "Fit"); }
         return true;
