@@ -102,6 +102,12 @@ uint32_t dm_nextendo_account_id(uint64_t *out) { @autoreleasepool {
     *out = c.pid; return 0;
 } }
 uint32_t dm_nextendo_account_ensure(void) { @autoreleasepool { return credential() ? 0 : DM_ACCOUNT_FAIL; } }
+uint32_t dm_nextendo_account_username(char out[33]) { @autoreleasepool {
+    if (!out) return DM_ACCOUNT_FAIL; memset(out, 0, 33); DmNextendoCredential *c = credential(); if (!c) return DM_ACCOUNT_FAIL;
+    const char *name = c.username.UTF8String; size_t n = name ? strlen(name) : 0;
+    if (n > 32) { n = 32; while (n && ((unsigned char)name[n] & 0xc0) == 0x80) n--; }   // whole UTF-8 characters only
+    if (!n) return DM_ACCOUNT_FAIL; memcpy(out, name, n); return 0;
+} }
 // Host-only API authorization. Never serialized into a game bundle or HLE output.
 NSString *dm_nextendo_api_bearer(void) { return credential().token; }
 NSData *dm_nextendo_api_identity(void) {
