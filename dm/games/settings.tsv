@@ -24,7 +24,7 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=bas
 DM_FULLSCREEN	choice	0=Window,1=Fullscreen	0	platform:mac	Game	Display mode		level=basic
 DM_PICTURE_FIT	choice	fit=Fit,fill=Fill	fit	platform:ios	Game	Picture	Fill crops the game's 16:9 picture to cover the screen. Health bars, subtitles or maps near the edges can be cut off. A full-screen picture without cropping needs a patch for each game.
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	platform:ios	Game	Frame-rate counter
-DM_NETWORK	choice	offline=Offline,lan=LAN,ldn=Local wireless,nextendo=Nextendo (online)?build:DM_NEXTENDO,auto=Local wireless and Nextendo?build:DM_NEXTENDO	build:DM_NETWORK	always	Game	Network	LAN and Local wireless play with devices on the same Wi-Fi network. Nextendo plays online through Nextendo, a community service, once you sign in under Online. Local wireless and Nextendo turns on both, for games that check their online service before local play.
+DM_NETWORK	choice	offline=Offline,lan=LAN,ldn=Local wireless,nextendo=Nextendo (online)?build:DM_NEXTENDO	build:DM_NETWORK	always	Game	Network	LAN and Local wireless play with devices on the same Wi-Fi network. Nextendo plays online through Nextendo, a community service, once you sign in under Online.
 DM_TOUCH_HAPTICS	toggle	-	1	platform:ios	Controls	Touch feedback
 DM_CONTROLS_SCALE	choice	0.75=75%,0.9=90%,1.0=100%,1.15=115%,1.35=135%	1.0	platform:ios	Controls	Controls size
 DM_CONTROLS_OPACITY	choice	0.3=30%,0.5=50%,0.7=70%,1.0=100%	1.0	platform:ios	Controls	Controls opacity
