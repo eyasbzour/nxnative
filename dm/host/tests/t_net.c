@@ -183,6 +183,11 @@ static void udp(void) {
           "RecvMsg scatters one datagram, reports its sender and no ancillary data");
     out_msg.control = control; out_msg.controllen = sizeof control; CHECK(GET(fn_msg, "nnsocketSendMsg")(guest, &out_msg, 0) < 0 && dm_net_errno() == 95, "SendMsg refuses ancillary data rather than drop it");
     out_msg.control = NULL; out_msg.controllen = 0; out_msg.iovlen = -1; CHECK(GET(fn_msg, "nnsocketSendMsg")(guest, &out_msg, 0) < 0 && dm_net_errno() == 22, "SendMsg rejects a negative iovec count");
+    out_msg.iovlen = 2; out_iov[1].len = 1ull << 40;
+    CHECK(GET(fn_msg, "nnsocketSendMsg")(guest, &out_msg, 0) < 0 && dm_net_errno() == 40, "a datagram over the message limit fails with EMSGSIZE before its iovecs are read"); out_iov[1].len = 4;
+    CHECK(sendto(native, "truncated", 9, 0, (struct sockaddr *)&sender, size) == 9, "native peer sends a datagram longer than the iovecs");
+    char small[4] = {0}; iovec_h small_iov = {small, 4}; msghdr_h cut = {NULL, 0, 0, &small_iov, 1, 0, NULL, 0, 0};
+    CHECK(GET(fn_msg, "nnsocketRecvMsg")(guest, &cut, 0) == 4 && !memcmp(small, "trun", 4) && cut.flags == 0x10, "a datagram longer than the iovecs is cut to them and reports MSG_TRUNC");
     int first_close = CLOSE(guest), repeated_close = CLOSE(guest);
     CHECK(first_close == 0 && repeated_close < 0 && dm_net_errno() == 9, "close owns guest socket only, second close EBADF");
     close(native);

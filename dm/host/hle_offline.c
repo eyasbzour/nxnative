@@ -171,32 +171,41 @@ HLE_FORCE("nnsocketListen", "socket transport, offline by default", int, h_c_sk_
 // RecvMsg / SendMsg (gRPC's TCP endpoint does all its reads and writes with them: nn::npln, Super Mario Bros. Wonder). Horizon's msghdr is FreeBSD's, 0x30 bytes: name +0x00,
 // namelen +0x08, iov +0x10, iovlen (int) +0x18, control +0x20, controllen +0x28, flags +0x2c; SDK 16's detail::RecvMsg (Wonder 1.2.1 sdk+0x14cf70) copies those 0x30 bytes into an
 // mmsghdr and calls RecvMMsg with one message. An iovec is a base and a length. The data goes through one host buffer: gathered before a send, scattered after a receive. No ancillary
-// data is carried: a receive reports none (controllen 0), and a send that has some fails with EOPNOTSUPP rather than drop it
+// data is carried: a receive reports none (controllen 0), and a send that has some fails with EOPNOTSUPP rather than drop it. The buffer holds at most SK_MSG_MAX bytes: on a
+// stream socket a longer message moves in part, as a real socket may move less than asked (the caller sends or reads the rest); no datagram is that long, so one fails with
+// EMSGSIZE. A datagram longer than the iovecs is cut to them and the receive reports MSG_TRUNC (0x10), as FreeBSD's does: the host asks for one byte more to see it
 typedef struct { void *name; uint32_t namelen, pad0; struct { void *base; uint64_t len; } *iov; int32_t iovlen, pad1; void *control; uint32_t controllen; int32_t flags; } sk_msghdr;
 _Static_assert(sizeof(sk_msghdr) == 0x30 && offsetof(sk_msghdr, iov) == 0x10 && offsetof(sk_msghdr, controllen) == 0x28 && offsetof(sk_msghdr, flags) == 0x2c, "Horizon msghdr");
 enum { SK_MSG_IOV_MAX = 1024, SK_MSG_MAX = 16 << 20 };
-static long sk_msg_size(const sk_msghdr *m) {
+enum { SK_MSG_TRUNC = 0x10 };
+static long sk_msg_size(const sk_msghdr *m, int datagram) {
     if (!m || m->iovlen < 0 || m->iovlen > SK_MSG_IOV_MAX || (m->iovlen && !m->iov)) { dm_net_set_errno(22); return -1; }
-    uint64_t total = 0; for (int i = 0; i < m->iovlen; i++) { if (m->iov[i].len && !m->iov[i].base) { dm_net_set_errno(14); return -1; } total += m->iov[i].len; if (total > SK_MSG_MAX) { dm_net_set_errno(22); return -1; } }
+    uint64_t total = 0;   // stops at SK_MSG_MAX + 1, whatever the lengths add up to
+    for (int i = 0; i < m->iovlen; i++) {
+        if (m->iov[i].len && !m->iov[i].base) { dm_net_set_errno(14); return -1; }
+        if (total <= SK_MSG_MAX) total = m->iov[i].len > SK_MSG_MAX - total ? SK_MSG_MAX + 1ull : total + m->iov[i].len;
+    }
+    if (total > SK_MSG_MAX) { if (datagram) { dm_net_set_errno(40); return -1; } total = SK_MSG_MAX; }
     return (long)total;
 }
 static long sk_recvmsg(int s, sk_msghdr *m, int f) {
-    long total = sk_msg_size(m); if (total < 0) return -1;
-    uint8_t *buffer = malloc(total ? (size_t)total : 1); if (!buffer) { dm_net_set_errno(12); return -1; }
+    int datagram = dm_net_socket_type(s) == 2; long total = sk_msg_size(m, datagram); if (total < 0) return -1;
+    uint8_t *buffer = malloc((size_t)total + 1); if (!buffer) { dm_net_set_errno(12); return -1; }
     unsigned namelen = m->name ? m->namelen : 0;
-    long got = dm_net_recv(s, buffer, (unsigned long)total, f, m->name, m->name ? &namelen : NULL);
+    long got = dm_net_recv(s, buffer, (unsigned long)total + (unsigned long)datagram, f, m->name, m->name ? &namelen : NULL);
     if (got >= 0) {
+        int cut = got > total; if (cut) got = total;
         long left = got; for (int i = 0; i < m->iovlen && left > 0; i++) { uint64_t n = m->iov[i].len < (uint64_t)left ? m->iov[i].len : (uint64_t)left; memcpy(m->iov[i].base, buffer + (got - left), n); left -= (long)n; }
-        if (m->name) m->namelen = namelen; m->controllen = 0; m->flags = 0;
+        if (m->name) m->namelen = namelen; m->controllen = 0; m->flags = cut ? SK_MSG_TRUNC : 0;
     }
     free(buffer); return got;
 }
 HLE_FORCE_WAIT("nnsocketRecvMsg", "scatter receive through one host buffer; no ancillary data", long, h_c_sk_RecvMsg, int s, sk_msghdr *m, int f) { return dm_net_guest_errno(sk_recvmsg(s, m, f)); }
 static long sk_sendmsg(int s, const sk_msghdr *m, int f) {
-    long total = sk_msg_size(m); if (total < 0) return -1;
+    long total = sk_msg_size(m, dm_net_socket_type(s) == 2); if (total < 0) return -1;
     if (m->control && m->controllen) { dm_net_set_errno(95); static int told; if (!told++) LOG("[RED] socket: SendMsg with ancillary data (%u bytes): not carried, the send fails", m->controllen); return -1; }
     uint8_t *buffer = malloc(total ? (size_t)total : 1); if (!buffer) { dm_net_set_errno(12); return -1; }
-    long at = 0; for (int i = 0; i < m->iovlen; i++) { memcpy(buffer + at, m->iov[i].base, m->iov[i].len); at += (long)m->iov[i].len; }
+    long at = 0; for (int i = 0; i < m->iovlen && at < total; i++) { long n = m->iov[i].len < (uint64_t)(total - at) ? (long)m->iov[i].len : total - at; memcpy(buffer + at, m->iov[i].base, (size_t)n); at += n; }
     long sent = dm_net_send(s, buffer, (unsigned long)total, f, m->name, m->name ? m->namelen : 0);
     free(buffer); return sent;
 }

@@ -300,6 +300,10 @@ static int net_close_owned(int guest, int check_generation, uint64_t generation)
     return net_host_result(result, err);
 }
 int dm_net_close(int guest) { return net_gate() ? net_close_owned(guest, 0, 0) : -1; }
+int dm_net_socket_type(int guest) {
+    pthread_mutex_lock(&g_net_lock); int type = guest >= 0 && guest < NET_MAX && g_sockets[guest].used ? g_sockets[guest].type : 0; pthread_mutex_unlock(&g_net_lock);
+    return type;
+}
 int dm_net_close_generation(int guest, uint64_t generation) { return net_close_owned(guest, 1, generation); }
 // An event descriptor in a network mode (nn::socket::EventFd; gRPC wakes its pollers with one while they poll its sockets, nn::npln). It takes a slot of the socket table, so the
 // sockets and the event descriptors share one numbering, lowest free first, and Poll, Select, Close and the generation checks treat it as any descriptor. Its host descriptor is

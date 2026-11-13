@@ -78,6 +78,7 @@ long dm_net_guest_errno(long r);
 int dm_net_guest_errno_get(void);   // the game's errno, or the host's when the game has no __errno_location
 int dm_net_socket(int family, int type, int protocol);
 int dm_net_close(int fd);
+int dm_net_socket_type(int fd);   // 1 stream, 2 datagram, 0 none the host made; sets no errno
 // Event descriptors in a network mode, in the socket table's numbering (hle_net_backend.c): Horizon's EventFd flags, Linux errno through dm_net_errno
 int dm_net_eventfd(uint64_t initial, int flags);
 int dm_net_eventfd_read(int fd, uint64_t *value);
