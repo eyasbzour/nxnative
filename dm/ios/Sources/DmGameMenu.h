@@ -15,6 +15,7 @@ void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
 void dm_gamepad_scale(const char *value);   // DM_CONTROLS_SCALE
 void dm_gamepad_opacity(const char *value);   // DM_CONTROLS_OPACITY
 bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
+void *dm_quit_menu(void);   // front_ios.m: the menu's last item, Quit <game>, which opens the quit prompt (a retained UIMenu, shown inline)
 #ifdef __cplusplus
 }
 #endif

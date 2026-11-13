@@ -32,6 +32,7 @@ private func gameMenuItems() -> [UIMenuElement] {
         }
     }
     if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
+    items.append(Unmanaged<UIMenu>.fromOpaque(dm_quit_menu()).takeRetainedValue())   // Quit <game>, last and on its own: it opens the quit prompt (front_ios.m)
     return items
 }
 
