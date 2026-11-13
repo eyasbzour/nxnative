@@ -12,6 +12,8 @@ bool dm_pad_layout_offered(int layout);   // Tap only in handheld mode
 void dm_pad_edit(void);   // opens the control editor (DmGamepad.m)
 void dm_pad_layout_set(int layout);   // releases every touch first, and is saved for the next start
 void dm_gamepad_touch_feedback(bool on);   // DM_TOUCH_HAPTICS
+void dm_gamepad_scale(const char *value);   // DM_CONTROLS_SCALE
+void dm_gamepad_opacity(const char *value);   // DM_CONTROLS_OPACITY
 bool dm_setting_live(const char *env, const char *value);   // front_ios.m: value NULL asks whether the running game takes env at once; otherwise applies it
 #ifdef __cplusplus
 }
