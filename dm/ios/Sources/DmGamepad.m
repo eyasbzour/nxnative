@@ -1,6 +1,6 @@
 // Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
 //   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
-//   The menu button stays while a physical controller is connected, so the menu is there in every layout and with every controller.
+//   The menu button hides when a physical controller is in use and the picture is on a TV. On the device screen it fades out after 3 idle seconds while a physical controller is in use and returns for 3 seconds on any screen touch.
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
 //     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
@@ -13,7 +13,7 @@
 //   Controls size (DM_CONTROLS_SCALE, 0.75 to 1.35) multiplies the unit of the left stick, the diamond and the D-pad; Controls opacity (DM_CONTROLS_OPACITY, 0.3 to 1) dims every control, the menu button too.
 //     Both are launcher and in-game menu settings that apply while the game runs (front_ios.m dm_setting_live); a diamond key's touch circle stays at least 44 points across.
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame; Super Mario Galaxy's pointer in handheld mode).
-//   The virtual gamepad (all but the menu button) hides while a physical controller is connected and comes back when it is removed; unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
+//   The touch sticks and keys hide while a physical controller is connected and return when it is removed. Unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
 //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
 //   Edit mode: open the in-game menu (the gear) and choose Edit controls (or turn on "Edit controls at start", DM_PAD_EDIT, on the settings screen) to drag each control where you want it and set its size (a slider);
 //     the positions are offsets from the built-in layout in u and the sizes factors, shared by the 2D and the 3D layout, kept in NSUserDefaults (DmPadCustom); not offered in the Tap layout.
@@ -139,7 +139,8 @@ static const CGFloat
     K_CLICK_X = 102, K_CLICK_R = 17,                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
     K_SCALE_MIN = 0.75, K_SCALE_MAX = 1.35,         // Controls size (DM_CONTROLS_SCALE): times the unit of the stick, the diamond and the D-pad; at 0.75 a diamond key's touch circle is still 44 points across (K_HIT_MIN)
     K_OPACITY_MIN = 0.3,                            // Controls opacity (DM_CONTROLS_OPACITY): how solid every control is, 1 as drawn
-    K_HIT_MIN = 22;                                 // a diamond key's touch circle: radius, at least this
+    K_HIT_MIN = 22,                                 // a diamond key's touch circle: radius, at least this
+    K_MENU_IDLE = 3.0;                              // seconds a connected controller leaves the menu gear visible before fading it out
 static const int k_btns[] = {B_ZL, B_L, B_ZR, B_R, B_MINUS, B_PLUS, B_LS, B_RS};   // keys locked at touch-down (L3 / R3 only in the 3D layout)
 static NSString *const k_custom_key = @"DmPadCustom";   // NSUserDefaults: E_N triples [dx, dy, size] (dx, dy in u from the built-in place, size a factor); absent = the built-in layout
 static NSString *const k_stick_key = @"DmPadStick";   // NSUserDefaults: [left, right] stick styles, 0 = floating, 1 = fixed, 2 = off, 3 = floating and invisible (the left stick is turned off by its entry in k_shown_key); absent = K_SS_LEFT, K_SS_RIGHT
@@ -169,6 +170,11 @@ static CGFloat pad_setting(const char *value, CGFloat lo, CGFloat hi) {   // DM_
 - (void)enterEdit;
 - (void)arrange:(DmLayout)layout;
 - (BOOL)menuTakes:(CGPoint)p;
+- (BOOL)webTouchActive;
+- (BOOL)voiceOverRunning;
+- (BOOL)reduceMotionEnabled;
+- (void)wakeMenu;
+- (void)setMenuOpen:(BOOL)open;
 @end
 // The menu button: a UIButton whose menu is the in-game menu (UIKit draws it and takes the touches while it is open). Its hit circle is larger than the drawn one, and a key nearer
 // to the touch wins (− / + sit beside it), so it asks the pad
@@ -176,6 +182,13 @@ static CGFloat pad_setting(const char *value, CGFloat lo, CGFloat hi) {   // DM_
 @end
 @implementation DmMenuButton
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e { DmGamepad *pad = (DmGamepad *)self.superview; return [pad menuTakes:[self convertPoint:p toView:pad]]; }
+- (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [super touchesBegan:ts withEvent:e]; [(DmGamepad *)self.superview wakeMenu]; }
+- (void)contextMenuInteraction:(UIContextMenuInteraction *)i willDisplayMenuForConfiguration:(UIContextMenuConfiguration *)c animator:(id<UIContextMenuInteractionAnimating>)a {
+    [super contextMenuInteraction:i willDisplayMenuForConfiguration:c animator:a]; [(DmGamepad *)self.superview setMenuOpen:YES];
+}
+- (void)contextMenuInteraction:(UIContextMenuInteraction *)i willEndForConfiguration:(UIContextMenuConfiguration *)c animator:(id<UIContextMenuInteractionAnimating>)a {
+    [super contextMenuInteraction:i willEndForConfiguration:c animator:a]; [(DmGamepad *)self.superview setMenuOpen:NO];
+}
 @end
 static __weak DmGamepad *g_view;
 static void pads_start(void);   // Physical controllers, below
@@ -191,6 +204,8 @@ static void pads_start(void);   // Physical controllers, below
     CAShapeLayer *_ring, *_knob;                   // the left stick (the right one is not drawn)
     DmMenuButton *_menu;                           // opens the in-game menu (GameMenu.swift)
     CAShapeLayer *_ringR, *_knobR;                 // the right stick, drawn as a fixed one, or while held when floating
+    unsigned _menuGen;                             // generation counter for the controller-idle menu fade timer
+    BOOL _menuOpen;                                // the in-game menu is currently presented
     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
     unsigned _hapticSticks;
     BOOL _stickShown;                              // a stick was held at the last refresh
@@ -284,6 +299,7 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
         NSNotificationCenter *nc = NSNotificationCenter.defaultCenter;
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidConnectNotification object:nil];
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
+        [nc addObserver:self selector:@selector(updateControlVisibility) name:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
         pads_start();
         [self padsChanged:nil];
         motion_start();
@@ -329,9 +345,11 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
 
 // ---- Layout (points; computed inside the safe area) ----
 - (void)arrange:(DmLayout)layout {
-    if (CGRectEqualToRect(_layout.controls, layout.controls) && CGRectEqualToRect(_layout.game, layout.game) && _layout.separated == layout.separated && _layout.topSafeOnly == layout.topSafeOnly) return;
+    if (CGRectEqualToRect(_layout.controls, layout.controls) && CGRectEqualToRect(_layout.game, layout.game) && _layout.separated == layout.separated && _layout.topSafeOnly == layout.topSafeOnly
+        && _layout.onTV == layout.onTV) return;
     [self reset];   // A finger held across a pose change must not leave a key or game touch stuck.
     _layout = layout;
+    [self updateControlVisibility];
     [self setNeedsLayout];
 }
 - (CGRect)safe { return CGRectIntersection(_layout.controls, UIEdgeInsetsInsetRect(self.bounds, dm_game_safe_insets(self.bounds, self.safeAreaInsets, _layout.topSafeOnly))); }
@@ -525,11 +543,19 @@ int front_web_touch(void);
     if (!_stick[0] && dist(p, self.stickHome) / MAX([self stickR:0] * K_STICK_GRAB, _layout.separated ? 22 : 0) < 1) return YES;
     return _full && !_stick[1] && [self inRightArea:p];
 }
+- (BOOL)webTouchActive { return front_web_touch() != 0; }
+- (BOOL)voiceOverRunning { return UIAccessibilityIsVoiceOverRunning(); }
+- (BOOL)reduceMotionEnabled { return UIAccessibilityIsReduceMotionEnabled(); }
 - (UIView *)hitTest:(CGPoint)p withEvent:(UIEvent *)e {
     UIView *v = [super hitTest:p withEvent:e];
-    return v == self && front_web_touch() && ![self controlAt:p] ? nil : v;
+    if (v == self && [self webTouchActive] && ![self controlAt:p]) {
+        if (_padOff && !_layout.onTV && e && e.type == UIEventTypeTouches) [self wakeMenu];
+        return nil;
+    }
+    return v;
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    if (_padOff && !_layout.onTV) [self wakeMenu];
     if (_edit) { [self editBegan:ts]; return; }
     BOOL game = NO;
     for (UITouch *t in ts) {
@@ -1032,11 +1058,44 @@ static BOOL pads_slotted(GCController *gone) {
     dispatch_async(dispatch_get_main_queue(), ^{ cp_poll(); });   // a controller came or went while the controller applet's prompt is up
     return waiting || pad_slot_mask(&g_slots) != 0;   // a controller waiting for its first press hides the touch gamepad too
 }
+- (void)wakeMenu {
+    unsigned gen = ++_menuGen;
+    [_menu.layer removeAllAnimations];
+    _menu.hidden = NO; _menu.alpha = g_opacity;
+    if (!_padOff || _layout.onTV || _menuOpen || [self voiceOverRunning]) return;
+    __weak DmGamepad *weak = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(K_MENU_IDLE * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DmGamepad *s = weak;
+        if (!s || s->_menuGen != gen || !s->_padOff || s->_layout.onTV || s->_menuOpen || [s voiceOverRunning]) return;
+        if ([s reduceMotionEnabled]) {
+            s->_menu.alpha = 0; s->_menu.hidden = YES;
+            return;
+        }
+        [UIView animateWithDuration:0.3 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            s->_menu.alpha = 0;
+        } completion:^(BOOL finished) {
+            if (finished && s->_menuGen == gen && s->_padOff && !s->_layout.onTV && !s->_menuOpen && ![s voiceOverRunning]) s->_menu.hidden = YES;
+        }];
+    });
+}
+- (void)setMenuOpen:(BOOL)open {
+    _menuOpen = open;
+    if (_padOff && !_layout.onTV) [self wakeMenu];
+}
+- (void)updateControlVisibility {
+    _controls.hidden = _padOff;
+    if (_padOff && _layout.onTV) {
+        ++_menuGen; [_menu.layer removeAllAnimations];
+        _menu.alpha = g_opacity; _menu.hidden = YES;
+    } else {
+        [self wakeMenu];
+    }
+}
 - (void)padsChanged:(NSNotification *)note {
     GCController *c = note.object, *gone = [note.name isEqual:GCControllerDidDisconnectNotification] ? c : nil;
     if (c && (!c.extendedGamepad || g_merge)) LOG("controller %s: %s%s", gone ? "disconnected" : "connected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
     BOOL any = g_merge ? pads_merged(gone) : pads_slotted(gone);
-    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; self->_controls.hidden = any; if (any) [self leaveEdit]; [self reset]; });   // the touch gamepad hides while any controller is in use
+    dispatch_async(dispatch_get_main_queue(), ^{ self->_padOff = any; [self updateControlVisibility]; if (any) [self leaveEdit]; [self reset]; });   // the touch gamepad hides while any controller is in use
 }
 @end
 
