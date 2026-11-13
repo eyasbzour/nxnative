@@ -277,7 +277,7 @@ static void builtin_store(void) {
     typedef uint32_t (*GetCerts)(void **, uint8_t *, unsigned, const uint32_t *, unsigned);
     GetSize get_size = H(GetSize, "_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj");
     GetCerts get_certs = H(GetCerts, "_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj");
-    unsetenv("DM_SYSTEM_DATA_DIR"); unsigned size = 99; uint32_t id = 1;
+    unsetenv("DM_SYSTEM_DATA_DIR"); unsetenv("DM_SYSTEM_DIR"); unsigned size = 99; uint32_t id = 1;
     CHECK(dm_ssl_import_server(context_key, NULL, caDer.bytes, (unsigned)caDer.length, 2) == DM_SSL_BAD_POINTER, "server certificate import requires its public output ID pointer");
     CHECK(get_size(&size, &id, 1) != 0 && !size, "missing firmware never fabricates a built-in CA");
     [[NSFileManager defaultManager] createDirectoryAtPath:[store_path() stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
@@ -304,7 +304,14 @@ static void builtin_store(void) {
     fixture = store_fixture(1); [fixture writeToFile:store_path() atomically:YES];
     int fd = create(false); hostname("localhost"); CHECK(handshake(false) == 0, "original trusted firmware anchor applies only to the TLS context"); destroy(fd, false);
     rejected(false, "wrong.invalid");
-    free(buffer); [[NSFileManager defaultManager] removeItemAtPath:store_path() error:nil]; unsetenv("DM_SYSTEM_DATA_DIR");
+    // The CertStore archive's file in DM_SYSTEM_DIR's system data layout (hle_fs.c), when DM_SYSTEM_DATA_DIR has none
+    [[NSFileManager defaultManager] removeItemAtPath:store_path() error:nil]; unsetenv("DM_SYSTEM_DATA_DIR");
+    NSString *sysdata = [systemRoot stringByAppendingPathComponent:@"sysdata/0100000000000800/ssl_TrustedCerts.bdf"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:[sysdata stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+    CHECK([store_fixture(1) writeToFile:sysdata atomically:YES], "write synthetic public test CA store in the system data layout");
+    setenv("DM_SYSTEM_DIR", systemRoot.fileSystemRepresentation, 1);
+    CHECK(get_size(&size, &id, 1) == 0 && size == 24 + ((caDer.length + 3) & ~(NSUInteger)3), "store read from DM_SYSTEM_DIR/sysdata/0100000000000800");
+    free(buffer); [[NSFileManager defaultManager] removeItemAtPath:sysdata error:nil]; unsetenv("DM_SYSTEM_DIR");
 }
 static int check_real_store(const char *directory) {
     setenv("DM_NETWORK", "lan", 1); setenv("DM_SYSTEM_DATA_DIR", directory, 1); uint32_t all = UINT32_MAX; unsigned size = 0;

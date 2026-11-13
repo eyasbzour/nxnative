@@ -14,6 +14,18 @@ static Result ssl_note(const char *call, Result r) {
     if (fresh) LOG("[RED] ssl: %s -> %#x", call, r);
     return r;
 }
+// A built-in certificate request logs once per call, first ID, count and result (success too: a game that builds its own TLS roots from the store, as Super Mario
+// Bros. Wonder's gRPC does one ID at a time, shows here whether it asked at all and which ID it stopped at). IDs only, never a certificate
+static Result builtin_note(const char *call, const uint32_t *ids, unsigned n, Result r) {
+    static struct { const char *call; uint32_t id; unsigned n; Result r; } seen[48]; static unsigned count; static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    uint32_t id = ids && n ? ids[0] : 0;
+    pthread_mutex_lock(&lock); int fresh = 1;
+    for (unsigned i = 0; i < count; i++) if (seen[i].call == call && seen[i].id == id && seen[i].n == n && seen[i].r == r) fresh = 0;
+    if (fresh && count < 48) { seen[count].call = call; seen[count].id = id; seen[count].n = n; seen[count].r = r; count++; } else fresh = 0;
+    pthread_mutex_unlock(&lock);
+    if (fresh) LOG("%sssl: built-in certificates %s: ID %#x%s -> %#x", r ? "[RED] " : "", call, id, n > 1 ? " and more" : "", r);
+    return r;
+}
 
 
 HLE_FORCE_WAIT("_ZN2nn3ssl10InitializeEv", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_0, void) { Result r = dm_ssl_initialize(3); dmnd_record(DMND_SSL,DMND_OP_SSL_INIT,0,0,(int32_t)r,0,0,__builtin_return_address(0),0); return r; }
@@ -76,8 +88,8 @@ HLE_FORCE_WAIT("_ZN2nn3ssl10Connection12GetContextIdEPm", "client TLS service; s
 HLE_FORCE_WAIT("_ZN2nn3ssl10Connection13GetCipherInfoEPNS1_10CipherInfoE", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_57, void *self, void *out) { return dm_ssl_cipher_info(self, out); }
 HLE_FORCE_WAIT("_ZN2nn3ssl10Connection16SetNextAlpnProtoEPKhj", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_58, void *self, const uint8_t *bytes, unsigned size) { return dm_ssl_set_alpn(self, bytes, size); }
 HLE_FORCE_WAIT("_ZN2nn3ssl10Connection16GetNextAlpnProtoEPNS1_14AlpnProtoStateEPhPjj", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_59, void *self, unsigned *state, uint8_t *bytes, unsigned *size, unsigned capacity) { return dm_ssl_get_alpn(self, state, bytes, size, capacity); }
-HLE_FORCE_WAIT("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_60, unsigned *out, const uint32_t *ids, unsigned count) { return dm_ssl_builtin_size(out, ids, count); }
-HLE_FORCE_WAIT("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_61, void **out, uint8_t *buffer, unsigned capacity, const uint32_t *ids, unsigned count) { return dm_ssl_builtin_certificates(out, buffer, capacity, ids, count); }
+HLE_FORCE_WAIT("_ZN2nn3ssl14BuiltInManager28GetBuiltInCertificateBufSizeEPjPNS0_15CaCertificateIdEj", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_60, unsigned *out, const uint32_t *ids, unsigned count) { return builtin_note("size", ids, count, dm_ssl_builtin_size(out, ids, count)); }
+HLE_FORCE_WAIT("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_61, void **out, uint8_t *buffer, unsigned capacity, const uint32_t *ids, unsigned count) { return builtin_note("get", ids, count, dm_ssl_builtin_certificates(out, buffer, capacity, ids, count)); }
 HLE_FORCE_WAIT("_ZN2nn3ssl10Connection17FlushSessionCacheEv", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_62, void *self) { (void)self; return DM_SSL_FAIL; }
 HLE_FORCE_WAIT("_ZN2nn3ssl10Connection20SetRenegotiationModeENS1_17RenegotiationModeE", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_63, void *self, unsigned mode) { (void)self; (void)mode; return DM_SSL_FAIL; }
 HLE_FORCE_WAIT("_ZN2nn3ssl10Connection20GetRenegotiationModeEPNS1_17RenegotiationModeE", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_64, void *self, unsigned *out) { (void)self; if (out) *out = 0; return DM_SSL_FAIL; }
@@ -115,4 +127,4 @@ HLE_FORCE_WAIT("nnsslConnectionGetConnectionId", "client TLS service; scoped cer
 HLE_FORCE_WAIT("nnsslConnectionGetContextId", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_96, void *self, uint64_t *out) { return dm_ssl_connection_id(self, out, true); }
 HLE_FORCE_WAIT("nnsslConnectionSetNextAlpnProto", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_97, void *self, const uint8_t *bytes, unsigned size) { return dm_ssl_set_alpn(self, bytes, size); }
 HLE_FORCE_WAIT("nnsslConnectionGetNextAlpnProto", "client TLS service; scoped certificate and hostname validation", Result, tls_hook_98, void *self, unsigned *state, uint8_t *bytes, unsigned *size, unsigned capacity) { return dm_ssl_get_alpn(self, state, bytes, size, capacity); }
-HLE_FORCE_WAIT("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", "original firmware certificate IDs and DER; context-scoped trust", Result, tls_legacy_builtin_info, void **out, uint8_t *buffer, unsigned capacity, const uint32_t *ids, unsigned count) { return dm_ssl_builtin_certificates(out, buffer, capacity, ids, count); }
+HLE_FORCE_WAIT("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", "original firmware certificate IDs and DER; context-scoped trust", Result, tls_legacy_builtin_info, void **out, uint8_t *buffer, unsigned capacity, const uint32_t *ids, unsigned count) { return builtin_note("get", ids, count, dm_ssl_builtin_certificates(out, buffer, capacity, ids, count)); }
