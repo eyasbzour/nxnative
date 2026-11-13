@@ -1,10 +1,10 @@
-// Virtual gamepad (Nintendo button positions) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
+// Virtual gamepad (Nintendo button positions, or Xbox / PlayStation with DM_PAD_AB=xbox) + physical controllers (GameController), handed to the host through dm_input_set and dm_pad_set_player (hle_hid.c, bit layout in dm_input.h).
 //   Two layouts, three in handheld mode, picked in the in-game menu (GameMenu.swift) that the menu button at the top centre (a gear) opens; the choice is kept in NSUserDefaults (each game is its own app, so per game); the first launch uses the game profile's pad_layout (DM_GAME_PAD_LAYOUT).
 //   The menu button hides when a physical controller is in use and the picture is on a TV. On the device screen it fades out after 3 idle seconds while a physical controller is in use and returns for 3 seconds on any screen touch.
 //   The menu's last item quits the game (a prompt, front_ios.m), and so does holding a controller's Home button for 2 seconds.
 //   Tap (touch): no control but the menu button, every other touch goes to the game's local touch viewport; offered only while the game is in handheld mode, the only one in which it reads the touch screen (Balatro, played by touch).
 //   2D (simple): top corners ZL above L (one column), ZR above R likewise, teardrops with the tip toward the screen corner; − and + side by side at the top centre; the left stick in the bottom-left corner (fixed ring, tilt measured from the ring centre, small dead zone);
-//     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys. Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
+//     the A (right) B (bottom) X (top) Y (left) diamond in the bottom-right corner, sliding a finger between keys switches keys; DM_PAD_AB=xbox (the launcher's A/B buttons) puts A at the bottom and B on the right (Xbox / PlayStation). Each bottom corner holds a single control, so it sits close in (reaching halfway into the side safe-area inset).
 //   3D (full, Pro Controller style): everything in 2D (left stick and diamond keep their place and size), plus a D-pad (inward of and below the left stick, 8-way), a right stick that is not drawn
 //     (a touch landing in the right third of the screen on no control holds it: centred where it lands, the centre dragged along once the finger passes the stick radius) and L3 / R3 (small round keys in the top row, inward of ZL / ZR).
 //     Breath of the Wild crouches with L3 and uses the scope with R3; 3D World and Breath of the Wild turn the camera with the right stick.
@@ -14,7 +14,7 @@
 //   Controls size (DM_CONTROLS_SCALE, 0.75 to 1.35) multiplies the unit of the left stick, the diamond and the D-pad; Controls opacity (DM_CONTROLS_OPACITY, 0.3 to 1) dims every control, the menu button too.
 //     Both are launcher and in-game menu settings that apply while the game runs (front_ios.m dm_setting_live); a diamond key's touch circle stays at least 44 points across.
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame; Super Mario Galaxy's pointer in handheld mode).
-//   The touch sticks and keys hide while a physical controller is connected and return when it is removed. Unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h).
+//   The touch sticks and keys hide while a physical controller is connected and return when it is removed. Unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h); DM_PAD_AB=xbox swaps A and B, so bottom = A and right = B (Xbox / PlayStation).
 //   Each physical controller is a player of its own (local co-op), as on the Mac: the first one connected is player 1, together with the touch gamepad, the next player 2, and so on up to 8; see "Physical controllers" below.
 //   Edit mode: open the in-game menu (the gear) and choose Edit controls (or turn on "Edit controls at start", DM_PAD_EDIT, on the settings screen) to drag each control where you want it and set its size (a slider);
 //     the positions are offsets from the built-in layout in u and the sizes factors, shared by the 2D and the 3D layout, kept in NSUserDefaults (DmPadCustom); not offered in the Tap layout.
@@ -148,6 +148,7 @@ static NSString *const k_stick_key = @"DmPadStick";   // NSUserDefaults: [left, 
 static NSString *const k_shown_key = @"DmPadShown";   // NSUserDefaults: for 2D and 3D, E_N numbers each: 0 = the layout's built-in choice, 1 = on, 2 = off
 static const CGFloat K_SIZE_MIN = 0.5, K_SIZE_MAX = 1.6;
 static NSString *const k_layout_key = @"DmPadLayout";   // NSUserDefaults: 0 = 2D, 1 = 3D, 2 = Tap (DM_GAME_PAD_LAYOUT's numbers)
+static int g_ab_xbox;   // DM_PAD_AB=xbox: A at the bottom and B on the right (Xbox / PlayStation), not Nintendo's A right / B bottom
 int dm_opmode(void);   // hle_oe.c: 0 = handheld
 void front_ios_quit_poll(void);          // front_ios.m: a controller's buttons changed (the Home hold, A and B in the quit prompt)
 int front_ios_quit_blocks_input(void);   // front_ios.m: the quit prompt has the controllers, the game gets none
@@ -255,6 +256,9 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
         }];
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
         g_scale = pad_setting(getenv("DM_CONTROLS_SCALE"), K_SCALE_MIN, K_SCALE_MAX); g_opacity = pad_setting(getenv("DM_CONTROLS_OPACITY"), K_OPACITY_MIN, 1);
+        const char *ab = getenv("DM_PAD_AB");
+        g_ab_xbox = ab && !strcmp(ab, "xbox");
+        LOG("front end: A/B buttons: %s", g_ab_xbox ? "A at the bottom, B on the right (Xbox / PlayStation)" : "A on the right, B at the bottom (Nintendo)");
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -392,6 +396,7 @@ static int segOf(int style) { for (int i = 0; i < 4; i++) if (k_segStyle[i] == s
 - (CGFloat)faceRof:(int)b { return self.faceR * (g_split ? [self sc:E_A + (b - B_A)] : 1); }   // a split key's own size on top of the diamond's
 - (CGFloat)faceHitR { return MAX(self.faceR * 1.25, K_HIT_MIN); }
 - (CGPoint)diamondPos:(int)b { CGPoint c = self.faceCenter; CGFloat g = self.faceGap;
+    if (g_ab_xbox) b = b == B_A ? B_B : b == B_B ? B_A : b;   // Xbox / PlayStation: A at the bottom, B on the right
     switch (b) { case B_A: return CGPointMake(c.x + g, c.y); case B_B: return CGPointMake(c.x, c.y + g); case B_X: return CGPointMake(c.x, c.y - g); default: return CGPointMake(c.x - g, c.y); } }
 - (CGPoint)facePos:(int)b { CGPoint p = [self diamondPos:b]; return g_split ? add(p, [self off:E_A + (b - B_A)]) : p; }   // split: where the diamond put it, moved by the key's own offset
 - (CGPoint)stickHome { return add([self stickBase], [self off:E_STICK]); }   // the left stick's ring centre
@@ -992,7 +997,7 @@ static void read_pad(GCExtendedGamepad *g) {
     front_ios_quit_poll(); if (front_ios_quit_blocks_input()) return;   // the quit prompt has the controllers (Home held 2 s, or Quit in the in-game menu)
     int p = g_merge ? 0 : pad_slot_of(&g_slots, (__bridge const void *)g.controller); if (p < 0 && !g_press_to_join) return;
     _Static_assert(DM_BTN_A == 1u << B_A && DM_BTN_B == 1u << B_B && DM_BTN_X == 1u << B_X && DM_BTN_Y == 1u << B_Y, "face button bits");
-    uint64_t m = dm_pad_face(g);   // by position, a Nintendo pad by its labels
+    uint64_t m = dm_pad_face_ab(g, g_ab_xbox);   // by position, a Nintendo pad by its labels (DM_PAD_AB=xbox swaps A and B)
     #define K(btn, bit) if (btn.isPressed) m |= 1ull << bit
     K(g.leftShoulder, B_L); K(g.rightShoulder, B_R); K(g.leftTrigger, B_ZL); K(g.rightTrigger, B_ZR);
     K(g.buttonMenu, B_PLUS); if (g.buttonOptions) K(g.buttonOptions, B_MINUS);
