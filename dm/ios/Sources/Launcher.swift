@@ -61,8 +61,8 @@ private struct CloudSavesSection: View {
     }
 }
 
-/// The birthday a game reads from the Nintendo Account info in Nextendo mode (hle_account.c, DM_NEXTENDO_BIRTHDAY): Nextendo does not give one, and iOS does not give
-/// apps the owner's. Kept under its own key as YYYY-MM-DD; 2000-01-01 (what Ryujinx-Nextendo and Mush8 send) until the player picks one
+/// The birthday a game reads from the Nintendo Account info in Nextendo mode (hle_account.c, DM_NEXTENDO_BIRTHDAY), when the Nextendo account gives none (the host
+/// takes the account's first); iOS does not give apps the owner's. Kept under its own key as YYYY-MM-DD; 2000-01-01 (what Ryujinx-Nextendo and Mush8 send) until the player picks one
 private let nextendoBirthdayKey = "nextendo.birthday"
 private let nextendoBirthdayDefault = "2000-01-01"
 private let nextendoBirthdayFormat: DateFormatter = {
@@ -89,7 +89,7 @@ private struct NextendoSection: View {
                 Text(busy ? "Checking…" : account ?? "Not signed in").foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
             if dm_nextendo_signed_in() {
-                DatePicker("Birthday", selection: birthdayDate, in: ...Date(), displayedComponents: .date)
+                DatePicker("Birthday, if Nextendo has none", selection: birthdayDate, in: ...Date(), displayedComponents: .date)
                 Button("Sign out", role: .destructive) { dm_nextendo_sign_out(); account = nil; note = "" }.disabled(busy)
             } else {
                 Button("Sign in…") {
@@ -104,6 +104,25 @@ private struct NextendoSection: View {
             guard dm_nextendo_signed_in() else { return }
             busy = true
             dm_nextendo_check { a, e in busy = false; account = a; note = e ?? "" }
+        }
+    }
+}
+
+/// The name other players see (DM_NICK; hle_account.c GetNickname). Empty: the Nextendo username in Nextendo mode, else Player. At most 10 characters, a Switch
+/// nickname's limit, which game menus are sized for. Kept under its own key, as VPN play's choices are, and put in the environment at Play while Network is not offline
+private let playerNameKey = "player.name"
+private let playerNameMax = 10
+private struct PlayerNameSection: View {
+    @Binding var name: String
+    let fixed: Bool   // an env file or the launch set DM_NICK: shown, not changed
+
+    var body: some View {
+        Section {
+            TextField("Use my Nextendo name", text: $name)
+                .textInputAutocapitalization(.never).autocorrectionDisabled().disabled(fixed)
+                .onChange(of: name) { _, typed in if typed.count > playerNameMax { name = String(typed.prefix(playerNameMax)) } }
+        } header: { Text("Player name") } footer: {
+            Text(fixed ? "Set by an env file or at launch." : "The name other players see, up to 10 characters. Leave it empty to use your Nextendo username (Player when not signed in).")
         }
     }
 }
@@ -179,6 +198,9 @@ private struct LauncherView: View {
     @AppStorage("vpnPlay.on") private var vpnOn = false
     @AppStorage("vpnPlay.host") private var vpnHost = ""
 
+    @AppStorage(playerNameKey) private var playerName = ""
+    private var nameFixed: Bool { m.fixed.contains("DM_NICK") }
+    private var nameShown: Bool { ["lan", "ldn", "nextendo", "auto"].contains(m.values["DM_NETWORK"] ?? "") }
     private var vpnFixed: Bool { m.fixed.contains("DM_NET_VPN") || m.fixed.contains("DM_NET_DISCOVERY_PEER") }
     private var vpnShown: Bool { ["lan", "ldn"].contains(m.values["DM_NETWORK"] ?? "") }
     private var vpnTyped: String { vpnHost.trimmingCharacters(in: .whitespaces) }
@@ -214,6 +236,9 @@ private struct LauncherView: View {
                     if vpnShown {
                         VpnSection(on: vpnFixed ? .constant(getenv("DM_NET_VPN").map { String(cString: $0) == "1" } ?? false) : $vpnOn,
                                    host: vpnFixed ? .constant(getenv("DM_NET_DISCOVERY_PEER").map { String(cString: $0) } ?? "") : $vpnHost, fixed: vpnFixed)
+                    }
+                    if nameShown {
+                        PlayerNameSection(name: nameFixed ? .constant(getenv("DM_NICK").map { String(cString: $0) } ?? "") : $playerName, fixed: nameFixed)
                     }
                     Section {
                         Button("Reset to tested defaults") { m.reset() }
@@ -308,7 +333,15 @@ private struct LauncherView: View {
         if let choice { setenv("DM_SAVE_SYNC_CHOICE", choice, 1); fputs("launcher: DM_SAVE_SYNC_CHOICE=\(choice)\n", stderr) }
         applyVpn()
         applyNextendoProfile()
+        applyPlayerName()
         play()
+    }
+
+    /// The typed player name (PlayerNameSection), while Network is not offline; what an env file or the launch set stays, and an empty field leaves the game's default
+    private func applyPlayerName() {
+        let typed = playerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !nameFixed, nameShown, !typed.isEmpty else { return }
+        setenv("DM_NICK", String(typed.prefix(playerNameMax)), 1); fputs("launcher: DM_NICK set\n", stderr)
     }
 
     /// The birthday picked under the Nextendo account and the device's region, for the Nintendo Account info a game reads online (hle_account.c: the Nextendo

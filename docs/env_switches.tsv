@@ -128,12 +128,12 @@ DM_NET_DISCOVERY_PEER	player	IPv4 address that a room search goes to instead of 
 DM_NET_TRACE	diagnostic	Log native socket and local-network translation details
 DM_NET_VPN	player	`1` plays LAN or local wireless over a VPN (Tailscale, ZeroTier, NetBird) in the lan and ldn modes. The VPN's adapter replaces Wi-Fi; with no VPN connected, or several adapters that could be it, a red line explains and the game gets no network. Native broadcast is not used, and a VPN address with no network around it (/32) is reported to the game as its private block (net_vpn.h)
 DM_NEXTENDO_BCAT_DIR	path	Private exact-title/version calendar recipe and optional validated seed; absent or invalid recipes never query the network
-DM_NEXTENDO_BIRTHDAY	player	Birthday a game reads from the Nintendo Account info in Nextendo mode, as YYYY-MM-DD. The launcher sets it from the picker under the Nextendo account; without it the game gets 2000-01-01
+DM_NEXTENDO_BIRTHDAY	player	Birthday a game reads from the Nintendo Account info in Nextendo mode, as YYYY-MM-DD, when the Nextendo account gives none. The launcher sets it from the picker under the Nextendo account; without either the game gets 2000-01-01
 DM_NEXTENDO_COUNTRY	player	Two-letter country a game reads from the Nintendo Account info in Nextendo mode when the Nextendo account has none. The launcher sets it from the device region
 DM_NEXTENDO_LOGIN_DIR	path	Folder of the Mac's stored Nextendo sign-in (dm/tools/nextendo_login.m; default ~/Library/Application Support/nxnative/nextendo); tests point it at a temporary folder
 DM_NEXTENDO_ROUTES	path	Explicit local public service policy TSV; AUTO enables online services only when nonempty, and configured invalid policies fail closed.
 DM_NEXTENDO_SERVICES	path	`=<folder>` (the NSP script's `--nextendo`) makes `build_ipa.sh` pack that public Nextendo service profile into the app as `dm/nextendo-services`; `main.m` hands it to the host as `DM_NEXTENDO_ROUTES`
-DM_NICK	switch	The account nickname the game sees (default: the Nextendo username in Nextendo mode, else `Player`)
+DM_NICK	switch	The account nickname the game sees, at most 32 bytes (default: the Nextendo username in Nextendo mode, else `Player`). The launcher sets it from its Player name field while Network is not offline
 DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
 DM_NRO_CAPTURE	diagnostic	folder: a `nn::ro::LoadModule` with no rewritten copy writes the image to `<folder>/<SHA-256>.nro` and ends the run (the NSP script's capture of an NRO the game decodes at run time)
 DM_NRO_DIR	path	folder of NROs the shader split reads like `main`, and in which it finds a CRA archive's file table (the NSP script sets it for a captured NRO)

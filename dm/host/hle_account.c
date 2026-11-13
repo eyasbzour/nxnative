@@ -75,7 +75,10 @@ HLE_FORCE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", "user nickna
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER; static char account[33];
     const char *e = getenv("DM_NICK");
     memset(nick, 0, 33);
-    if (e) { strncpy(nick, e, 32); return RES_OK; }
+    if (e) {   // whole UTF-8 characters only, as the Nextendo name is cut
+        size_t n = strlen(e); if (n > 32) { n = 32; while (n && ((unsigned char)e[n] & 0xc0) == 0x80) n--; }
+        memcpy(nick, e, n); return RES_OK;
+    }
     if (dm_net_nextendo_enabled()) {
         pthread_mutex_lock(&lock);
         if (!account[0] && !dm_nextendo_account_username(account)) LOG("account: nickname from the Nextendo account");
@@ -97,7 +100,7 @@ HLE_FORCE("_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10User
 // Brain vs. Brain, main+0xab8bc). In Nextendo mode, with the account signed in, it loads, as Ryujinx-Nextendo and Mush8 answer the account service's 0x68-byte NasUserBase
 // (birthday at 0, country at 0x20) that the SDK copies into this object. The host never writes the object, whose layout in a given SDK is unchecked: it takes over the
 // object's four getters, which return a string and its length. Country: the Nextendo account's (dm_nextendo_account_country), else the device's region (DM_NEXTENDO_COUNTRY,
-// which the launcher sets), else none. Birthday: the launcher's picker (DM_NEXTENDO_BIRTHDAY, YYYY-MM-DD), else 2000-01-01, the date both of those clients send. Gender and region: none
+// which the launcher sets), else none. Birthday: the Nextendo account's (dm_nextendo_account_birthday), else the launcher's picker (DM_NEXTENDO_BIRTHDAY, YYYY-MM-DD), else 2000-01-01, the date both of those clients send. Gender and region: none
 static char na_country[3], na_birthday[11] = "2000-01-01";   // set by a successful load, before the game reads the getters
 static int na_country_ok(const char *c) { return c && c[0] >= 'A' && c[0] <= 'Z' && c[1] >= 'A' && c[1] <= 'Z' && !c[2]; }
 static int na_birthday_ok(const char *b) {
@@ -112,9 +115,11 @@ HLE_FORCE_WAIT("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNinte
     if (!r) {
         char country[3] = {0}; if (dm_nextendo_account_country(country) || !na_country_ok(country)) country[0] = 0;
         const char *device = getenv("DM_NEXTENDO_COUNTRY"); if (!country[0] && na_country_ok(device)) memcpy(country, device, 3);
-        const char *birthday = getenv("DM_NEXTENDO_BIRTHDAY");
+        char account[11] = {0}; int own = !dm_nextendo_account_birthday(account) && na_birthday_ok(account);
+        const char *birthday = own ? account : getenv("DM_NEXTENDO_BIRTHDAY");
         memcpy(na_country, country, 3); memcpy(na_birthday, na_birthday_ok(birthday) ? birthday : "2000-01-01", 11);
-        static int told; if (!told++) LOG("account: Nintendo Account info: country %s, birthday %s", na_country[0] ? "set" : "none", na_birthday_ok(birthday) ? "from the launcher" : "2000-01-01");
+        static int told; if (!told++) LOG("account: Nintendo Account info: country %s, birthday %s", na_country[0] ? "set" : "none",
+                                          own ? "from the Nextendo account" : na_birthday_ok(birthday) ? "from the launcher" : "2000-01-01");
     }
     return acc_note("LoadCachedNintendoAccountInfo", r, online_user(h) ? ACC_NONE : ACC_NOT_LOCAL);
 }

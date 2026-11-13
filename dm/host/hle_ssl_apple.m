@@ -81,6 +81,7 @@ static uint64_t nextIdentifier;
 static _Atomic(dm_ssl_peer_policy_provider) peerProvider;
 static _Atomic(dm_ssl_peer_policy_provider) pinProvider;
 static _Atomic(bool (*)(const char *)) peerGuard;
+static _Atomic(bool (*)(const uint8_t **, size_t *)) builtinFallback;
 static void initialize_registry(void) { contexts = [NSMutableDictionary new]; connections = [NSMutableDictionary new]; }
 static NSValue *key(void *object) { return [NSValue valueWithPointer:object]; }
 static BOOL enabled(void) { return dm_net_enabled(); }
@@ -138,6 +139,7 @@ static OSStatus transport_write(SSLConnectionRef c, const void *p, size_t *n) { 
 void dm_ssl_set_peer_policy(dm_ssl_peer_policy_provider provider) { atomic_store(&peerProvider, provider); }
 void dm_ssl_set_peer_pin_policy(dm_ssl_peer_policy_provider provider) { atomic_store(&pinProvider, provider); }
 void dm_ssl_set_peer_guard(bool (*guard)(const char *)) { atomic_store(&peerGuard, guard); }
+void dm_ssl_set_builtin_fallback(bool (*provider)(const uint8_t **, size_t *)) { atomic_store(&builtinFallback, provider); }
 uint32_t dm_ssl_initialize(unsigned concurrency) { return concurrency >= 1 && concurrency <= 4 ? 0 : DM_SSL_FAIL; }
 uint32_t dm_ssl_finalize(void) { @autoreleasepool {
     pthread_once(&once, initialize_registry); pthread_mutex_lock(&registry);
@@ -191,7 +193,7 @@ static NSArray *parse_certificates(const void *bytes, unsigned size, int format)
 // The store is the player's own firmware file, in either place: <DM_SYSTEM_DATA_DIR>/0100000000000800/files/ssl_TrustedCerts.bdf, or the system data archive's RomFS
 // file in <DM_SYSTEM_DIR>/sysdata/0100000000000800/ (hle_fs.c's layout; the iOS app sets DM_SYSTEM_DIR to Documents/system, main.m). Its outcome is logged the first time
 // each one happens (which place, how many certificates, or why there is none; never a path or a certificate): a game whose own TLS takes its roots from the store
-// (Super Mario Bros. Wonder's gRPC, main+0xafaf50) builds no secure channel without it
+// (Super Mario Bros. Wonder's gRPC, main+0xafaf50) builds no secure channel without it, unless a stand-in CA is set (dm_ssl_set_builtin_fallback: Nextendo's, in Nextendo mode)
 static void store_note(const char *what, unsigned value) {   // what: a digit (which outcome, logged once), a space, the text
     static _Atomic unsigned told; unsigned bit = 1u << (what[0] & 15);
     if (atomic_fetch_or(&told, bit) & bit) return;
@@ -219,8 +221,13 @@ static BOOL der_sequence(const uint8_t *p, NSUInteger size) {   // tag 0x30, the
     NSUInteger length = 0; for (unsigned i = 0; i < n; i++) length = length << 8 | p[2 + i];
     return 2u + n + length == size;
 }
+static NSData *fallback_ca(void) {
+    bool (*provider)(const uint8_t **, size_t *) = atomic_load(&builtinFallback); const uint8_t *der = NULL; size_t size = 0;
+    return provider && provider(&der, &size) && der && size && size <= 65536 && der_sequence(der, size) ? [NSData dataWithBytes:der length:size] : nil;
+}
 static NSArray<NSDictionary *> *builtin_certificates(void) {
     const char *where = NULL; NSData *file = store_file(&where);
+    if (!file && fallback_ca()) return nil;   // select_builtin serves the stand-in and says so
     if (!file) { store_note("1 not found (looked for ssl_TrustedCerts.bdf under DM_SYSTEM_DATA_DIR and DM_SYSTEM_DIR/sysdata); places set:", (getenv("DM_SYSTEM_DATA_DIR") ? 1u : 0u) + (getenv("DM_SYSTEM_DIR") ? 1u : 0u)); return nil; }
     if (file.length < 8 || file.length > 4 * 1024 * 1024 || memcmp(file.bytes, "sslT", 4)) { store_note("2 rejected: not a CertStore file (size or magic); bytes", (unsigned)file.length); return nil; }
     uint32_t count; memcpy(&count, (const char *)file.bytes + 4, 4);
@@ -245,8 +252,19 @@ static NSArray<NSDictionary *> *builtin_certificates(void) {
 }
 static NSArray<NSDictionary *> *select_builtin(const uint32_t *ids, unsigned count, bool *all, unsigned *size) {
     *size = 0; *all = false; if (!ids || !count || count > 4096 || !enabled()) return nil;
-    NSArray *store = builtin_certificates(); if (!store) return nil;
+    NSArray *store = builtin_certificates();
     for (unsigned i = 0; i < count; i++) if (ids[i] == UINT32_MAX) *all = true;
+    // No firmware store: the provider's CA stands in, under each ID asked for (an All query gets it once, as ID 1). Only when no store file exists at all:
+    // a file that is there but rejected still fails, so a broken store is never hidden
+    NSData *ca = !store && !store_file(&(const char *){NULL}) ? fallback_ca() : nil;
+    if (ca) {
+        store_note("9 none on the device: Nextendo's CA stands in for the built-in certificates, IDs asked for:", count);
+        NSMutableArray *standIn = [NSMutableArray new];
+        if (*all) [standIn addObject:@{@"id":@1u, @"status":@1u, @"data":ca, @"readable":@YES}];
+        else for (unsigned i = 0; i < count; i++) [standIn addObject:@{@"id":@(ids[i]), @"status":@1u, @"data":ca, @"readable":@YES}];
+        store = standIn;
+    }
+    if (!store) return nil;
     NSMutableArray *selected = [NSMutableArray new];
     if (*all) [selected addObjectsFromArray:store];
     else for (unsigned i = 0; i < count; i++) {

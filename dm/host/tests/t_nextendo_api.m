@@ -39,6 +39,11 @@ int main(void) { @autoreleasepool {
     me_reply="{\"account\":{\"country\":\"fr \"},\"nsa\":\"abcdef0000001234\"}"; CHECK(!dm_nextendo_account_country(country) && !strcmp(country,"FR"));
     me_reply="{\"account\":{\"country\":\"France\"}}"; CHECK(!dm_nextendo_account_country(country) && !country[0]);
     me_reply="{\"account\":{}}"; CHECK(!dm_nextendo_account_country(country) && !country[0]);
+    char birthday[11]="x";
+    me_reply="{\"account\":{\"birthday\":\"1990-05-12\"}}"; CHECK(!dm_nextendo_account_birthday(birthday) && !strcmp(birthday,"1990-05-12"));
+    me_reply="{\"birth_date\":\"1991-02-03T00:00:00Z\"}"; CHECK(!dm_nextendo_account_birthday(birthday) && !strcmp(birthday,"1991-02-03"));
+    me_reply="{\"account\":{\"birthday\":\"12/05/1990\"}}"; CHECK(!dm_nextendo_account_birthday(birthday) && !birthday[0]);
+    me_reply="{\"account\":{}}"; CHECK(!dm_nextendo_account_birthday(birthday) && !birthday[0]);
     me_reply=NULL;
     for (unsigned status=300;status<=500;status+=100) { response_status=status; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0 && !size); }
     response_status=200; oversized=true; CHECK(dm_nextendo_api_request("friends",NULL,0,output,sizeof output,&size)!=0 && !size); oversized=false;
