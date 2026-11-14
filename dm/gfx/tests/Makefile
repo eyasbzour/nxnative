@@ -270,6 +270,9 @@ check_t_dispatch_barrier: t_dispatch_barrier
 	@set -e; for mode in full game; do for enc in 0 1; do \
 	    DM_NVN_DISPATCH_BARRIER=$$mode DM_NVN_ENC_THREAD=$$enc MTL_DEBUG_LAYER=1 ./t_dispatch_barrier; \
 	done; done
+t_args_gen: t_args_gen.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_args_gen.m $(MTL_T_SRC) $(FW)
+check_t_args_gen: RUN_ENV = MTL_DEBUG_LAYER=1
 t_vbuf: t_vbuf.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_vbuf.m $(MTL_T_SRC) $(FW)
 .PHONY: check_t_vbuf
@@ -522,6 +525,9 @@ t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 check_t_upgrade_alias: RUN_ENV = MTL_DEBUG_LAYER=1
 t_alias_takeover: t_alias_takeover.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_alias_takeover.m $(MTL_T_SRC) $(FW)
+t_dead_targets: t_dead_targets.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_dead_targets.m $(MTL_T_SRC) $(FW)
+check_t_dead_targets: RUN_ENV = MTL_DEBUG_LAYER=1
 check_t_alias_takeover: RUN_ENV = MTL_DEBUG_LAYER=1
 # The resource owner alone: nvn_owner.m (and the texture layouts it sizes shared entries with) with this test's stand-ins for the replay layer's hooks, no nvn_mtl.m
 t_serial_owner: t_serial_owner.m ../nvn/nvn_owner.m ../nvn/nvn_owner.h ../nvn/nvn_tex.c ../nvn/nvn_tex.h ../nvn/nvn_hmap.h ../nvn/nvn_obj.h $(GAME_H)
@@ -565,6 +571,13 @@ check_t_dlss_mfx: t_dlss_mfx
 	NSZombieEnabled=YES DM_NVN_ENC_THREAD=0 ./t_dlss_mfx
 	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 ./t_dlss_mfx
 	NSZombieEnabled=YES DM_NVN_ENC_THREAD=1 DM_NVN_BARRIER=game ./t_dlss_mfx
+t_pso_msaa: t_pso_msaa.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pso_msaa.m $(MTL_T_SRC) $(FW)
+.PHONY: check_t_pso_msaa
+check_t_pso_msaa: t_pso_msaa
+	DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_msaa
+	DM_PSO_MTL4=0 MTL_DEBUG_LAYER=1 ./t_pso_msaa
+	DM_NVN_ENC_THREAD=1 DM_PSO_MTL4=1 MTL_DEBUG_LAYER=1 ./t_pso_msaa
 t_buffer_image_bias: t_buffer_image_bias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_buffer_image_bias.m $(MTL_T_SRC) $(FW)
 check_t_buffer_image_bias: RUN_ENV = MTL_DEBUG_LAYER=1
