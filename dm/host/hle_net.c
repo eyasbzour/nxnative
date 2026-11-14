@@ -461,7 +461,6 @@ HLE_FORCE_WAIT("nnsocketSendTo", "socket send: local UDP offline, the transport 
 HLE_FORCE_WAIT("nnsocketRecvFrom", "socket receive: local UDP offline, the transport in a network mode", long, h_nsk_RecvFrom, int s, void *b, unsigned long n, int f, void *a, unsigned *al) { return SKD(dm_net_recv(s, b, n, f, a, al), dm_sk_recvfrom(s, b, n, f, a, al)); }
 HLE_FORCE_WAIT("nnsocketRead", "socket read: local UDP/EventFd offline, the transport in a network mode", long, h_nsk_Read, int s, void *b, unsigned long n) { return SKD(dm_net_recv(s, b, n, 0, NULL, NULL), dm_sk_read(s, b, n)); }
 HLE_FORCE_WAIT("nnsocketWrite", "socket write: local UDP/EventFd offline, the transport in a network mode", long, h_nsk_Write, int s, const void *b, unsigned long n) { return SKD(dm_net_send(s, b, n, 0, NULL, 0), dm_sk_write(s, b, n)); }
-HLE_FORCE_WAIT("nnsocketGetHostByNameWithOptions", "name resolution, offline by default", void *, h_nsk_GetHost, const char *n, const void *o, unsigned long c) { (void)o; (void)c; return dm_net_gethostbyname(n); }
 HLE_FORCE("nnsocketGetLastErrno", "the game's errno, as nn::socket::GetLastErrno reads it", int, h_nsk_GetErrno, void) { return dm_net_guest_errno_get(); }
 HLE_FORCE("nnsocketSetLastErrno", "sets the host's copy and the game's errno", void, h_nsk_SetErrno, int e) { dm_net_set_errno(e); dm_net_guest_errno(-1); }
 // ---------- ssl: hle_ssl.c (the client TLS service, offline and online) ----------
