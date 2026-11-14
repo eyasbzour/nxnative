@@ -41,9 +41,10 @@ Status: **done** (in the fork), **verify** (written, waiting for a device log), 
 | Friend list (`/api/friends`) | access token | nx2 token | nx2 token | verify: a refused request now logs its HTTP status |
 | Presence (`/api/presence`) | access token, every 45 s | on commit | on commit, then every 45 s | verify the token, done the repeat |
 | `UserPresence::SetDescription` | SDK code | cut | SDK code with Nextendo on | done |
-| Play time on Nextendo's site (`/api/history`) | yes | not checked | no (`AddPlayHistory` is cut) | todo |
+| Play time on Nextendo's site (`/api/history`) | yes | not checked | the account's total for the game plus this run's time, sent every minute | done; not yet seen on a device |
 | Play history registration key | n/a | from the firmware's friends module | local key | done |
-| The player's Mii from Nextendo | yes (launcher) | not checked | no; six default Miis | todo |
+| The player's Mii from Nextendo | yes (launcher) | not checked | the account's Mii joins the game's Mii database; nothing is uploaded, and Nextendo's site has no Mii maker | done; not yet seen on a device |
+| What the player does, beside the game's name (presence `app_detail`) | from the game's play report | not checked | the game's own `UserPresence::SetDescription` text | done; not yet seen on a device |
 
 ## Matchmaking and peer-to-peer
 
