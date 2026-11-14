@@ -169,6 +169,14 @@ class LauncherSettingsTests(unittest.TestCase):
                 profile = type('Profile', (), {'id': BOTW, 'get': lambda self, key, default='', bad=bad: bad})()
                 with self.assertRaises(SystemExit): settings.render_base(profile)
 
+    def test_internal_resolution_for_nvn_games_without_their_own_render_scale(self):   # DM_RESCALE (nvn_mtl.m); a stub's Render scale takes its place
+        self.assertEqual({k: v for k, v in build(WONDER, 'nvn')['DM_RESCALE'].items() if k in ('min', 'max', 'default')}, {'min': 0.5, 'max': 1.0, 'default': '1.0'})
+        self.assertNotIn('DM_RESCALE', build(WONDER, 'vulkan'))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')
+            rows = {s['env'] for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+        self.assertEqual(('DM_RENDER_SCALE' in rows, 'DM_RESCALE' in rows), (True, False))
+
     def test_render_scale_reaches_the_stubs_largest_scale(self):
         """The rewriter writes a render-scale stub's largest scale as RENDER_SCALE: 1 keeps the table's range (a stub that only lowers the size), 3 raises its top (Hades II)"""
         for value, top in (('1', 1.0), ('3', 3.0)):
