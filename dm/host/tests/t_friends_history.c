@@ -64,7 +64,13 @@ int main(void) {
     CHECK(h_fr_GetPHKey(output+1, zero_uid, 1) == DM_FRIENDS_HISTORY_INVALID_UID && all_zero(output+1, 64));
     CHECK(h_fr_GetPHKey(output+1, other_uid, 1) == DM_FRIENDS_HISTORY_INVALID_UID && all_zero(output+1, 64));
     CHECK(h_fr_GetPHKey(output+1, NULL, 1) == DM_FRIENDS_HISTORY_INVALID_UID);
-    CHECK(h_fr_GetPHKey(output+1, local_uid, 1) != 0 && all_zero(output+1, 64));
+    // No firmware keyring: this device's own eight keys sign, made once and kept private (another uid, so local_uid's UUID comes from fixed_random below)
+    uint8_t device_uid[16] = {4}; char device_keyring[PATH_MAX]; struct stat device_stat; uint8_t first[64];
+    CHECK(dm_friends_history_key(output+1, device_uid, 1) == 0 && output[1] == 1 && output[2] == 1 && output[3] < 8);
+    memcpy(first, output+1, 64);
+    snprintf(device_keyring, sizeof device_keyring, "%s/friends-history/device.keyring", root);
+    CHECK(!stat(device_keyring, &device_stat) && (device_stat.st_mode & 0777) == 0600 && device_stat.st_size == DM_FRIENDS_HISTORY_KEYRING_SIZE);
+    CHECK(dm_friends_history_key(output+1, device_uid, 1) == 0 && !memcmp(first+16, output+17, 16));   // the same UUID again
     CHECK(output[0] == 0x6a && output[65] == 0x6a && !wait_depth);
     dm_friends_history_set_key_provider(unavailable);
     CHECK(h_fr_GetPHKey(output+1, local_uid, 1) != 0 && all_zero(output+1, 64));

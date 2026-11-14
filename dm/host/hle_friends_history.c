@@ -2,7 +2,7 @@
 // Format verified against the player's own firmware's friends IPC10700: body32
 // {type u16=0x101, key-index u8, NSA-present u8, input-flag u8, reserved[3],
 //  NSA-ID u64, UUID[16]}, followed by HMAC-SHA256(body32, selected key32).
-// The eight signing keys come only from the privately imported firmware resource.
+// The eight signing keys come from the privately imported firmware resource, else from this device's own keyring (device_keys).
 #include "friends_history.h"
 #include <CommonCrypto/CommonHMAC.h>
 #include <errno.h>
@@ -59,20 +59,21 @@ static int exact_write(int fd, const void *bytes, size_t size) {
     }
     return fsync(fd) == 0;
 }
-static bool firmware_keys(uint8_t keys[8][32]) {
+// 1 read, 0 absent (no DM_SYSTEM_DATA_DIR, or a missing part of the path), -1 present but unusable (a link, not a regular file, the wrong size)
+static int firmware_keys(uint8_t keys[8][32]) {
     const char *root = getenv("DM_SYSTEM_DATA_DIR");
-    if (!root || !*root) return false;
+    if (!root || !*root) return 0;
     int base = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (base < 0) return false;
+    if (base < 0) return errno == ENOENT ? 0 : -1;
     int archive = openat(base, "010000000000000e", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    close(base); if (archive < 0) return false;
+    close(base); if (archive < 0) return errno == ENOENT ? 0 : -1;
     int files = openat(archive, "files", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    close(archive); if (files < 0) return false;
+    close(archive); if (files < 0) return errno == ENOENT ? 0 : -1;
     int fd = openat(files, "play-history.keyring", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    close(files); if (fd < 0) return false;
+    close(files); if (fd < 0) return errno == ENOENT ? 0 : -1;
     struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) &&
         st.st_size == DM_FRIENDS_HISTORY_KEYRING_SIZE && exact_read(fd, keys, DM_FRIENDS_HISTORY_KEYRING_SIZE);
-    close(fd); return ok;
+    close(fd); return ok ? 1 : -1;
 }
 static int uuid_valid(const uint8_t uuid[16]) {
     return (uuid[6] & 0xf0) == 0x40 && (uuid[8] & 0xc0) == 0x80;
@@ -89,33 +90,60 @@ static void hex_bytes(char *out, const uint8_t *bytes, unsigned count) {
     for (unsigned i = 0; i < count; ++i) { out[2*i] = hex[bytes[i] >> 4]; out[2*i+1] = hex[bytes[i] & 15]; }
     out[2*count] = 0;
 }
-static int local_uuid(const uint8_t uid[16], uint8_t uuid[16]) {
+// DM_ROOT/friends-history (the working directory when unset), private to this user; -1 when it cannot be made or is not private
+static int history_directory(void) {
     const char *root = getenv("DM_ROOT"); if (!root || !*root) root = ".";
     int base = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (base < 0) return 0;
+    if (base < 0) return -1;
     int made = mkdirat(base, "friends-history", 0700);
-    if (made && errno != EEXIST) { close(base); return 0; }
+    if (made && errno != EEXIST) { close(base); return -1; }
     int directory = openat(base, "friends-history", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    close(base); if (directory < 0) return 0;
+    close(base); if (directory < 0) return -1;
     struct stat st;
-    if (fstat(directory, &st) || st.st_uid != geteuid() || (st.st_mode & 077)) { close(directory); return 0; }
-    char name[42]; hex_bytes(name, uid, 16); memcpy(name+32, ".uuid.bin", 10);
-    int exists = read_uuid(directory, name, uuid);
-    if (exists) { close(directory); return exists > 0; }
-    uint8_t random[16]; history_random(uuid, 16); uuid[6] = (uuid[6] & 15) | 0x40; uuid[8] = (uuid[8] & 63) | 0x80;
-    history_random(random, sizeof random); char temporary[38] = ".tmp-"; hex_bytes(temporary+5, random, 16);
+    if (fstat(directory, &st) || st.st_uid != geteuid() || (st.st_mode & 077)) { close(directory); return -1; }
+    return directory;
+}
+// Commits `size` new bytes as `name` once: written to a temporary file, then renamed without replacing. 1 when the file now exists
+// (this process's or another's, which the caller reads back), 0 when it could not be written
+static int commit_once(int directory, const char *name, const void *bytes, size_t size) {
+    uint8_t random[16]; history_random(random, sizeof random); char temporary[38] = ".tmp-"; hex_bytes(temporary+5, random, 16);
     int fd = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) { close(directory); return 0; }
-    int ok = exact_write(fd, uuid, 16), committed = 0; close(fd);
+    if (fd < 0) return 0;
+    int ok = exact_write(fd, bytes, size), committed = 0; close(fd);
     if (ok) {
         if (!renameatx_np(directory, temporary, directory, name, RENAME_EXCL)) committed = 1;
         else if (errno != EEXIST) ok = 0;
     }
     if (!committed && unlinkat(directory, temporary, 0)) ok = 0;
     if (ok && fsync(directory)) ok = 0;
+    return ok;
+}
+static int local_uuid(const uint8_t uid[16], uint8_t uuid[16]) {
+    int directory = history_directory(); if (directory < 0) return 0;
+    char name[42]; hex_bytes(name, uid, 16); memcpy(name+32, ".uuid.bin", 10);
+    int exists = read_uuid(directory, name, uuid);
+    if (exists) { close(directory); return exists > 0; }
+    history_random(uuid, 16); uuid[6] = (uuid[6] & 15) | 0x40; uuid[8] = (uuid[8] & 63) | 0x80;
     // Another process may have committed first. Always use the committed file.
-    if (ok) ok = read_uuid(directory, name, uuid) == 1;
+    int ok = commit_once(directory, name, uuid, 16) && read_uuid(directory, name, uuid) == 1;
     close(directory); return ok;
+}
+// Without the firmware's keyring: eight signing keys of this device's own, random once and kept beside the UUIDs. A key they sign has the
+// firmware key's layout and a real HMAC, so games that only ask for one (Mario Kart 8 Deluxe before a local-wireless room) and other hosts,
+// whose AddPlayHistory registers nothing, take it; a console's friends service, which checks it against the firmware's keys, would not
+static bool device_keys(uint8_t keys[8][32]) {
+    int directory = history_directory(); if (directory < 0) return false;
+    static const char name[] = "device.keyring";
+    int fd = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0 && errno == ENOENT) {
+        uint8_t fresh[DM_FRIENDS_HISTORY_KEYRING_SIZE]; history_random(fresh, sizeof fresh);
+        int ok = commit_once(directory, name, fresh, sizeof fresh); history_clear(fresh, sizeof fresh);
+        fd = ok ? openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) : -1;
+    }
+    close(directory); if (fd < 0) return false;
+    struct stat st; int ok = !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == geteuid() && !(st.st_mode & 077) &&
+        st.st_size == DM_FRIENDS_HISTORY_KEYRING_SIZE && exact_read(fd, keys, DM_FRIENDS_HISTORY_KEYRING_SIZE);
+    close(fd); return ok;
 }
 uint32_t dm_friends_history_key(void *out, const void *uid_pointer, unsigned input_flag) {
     if (!out) return DM_FRIENDS_HISTORY_FAIL;
@@ -125,7 +153,18 @@ uint32_t dm_friends_history_key(void *out, const void *uid_pointer, unsigned inp
     if (!present) return DM_FRIENDS_HISTORY_INVALID_UID;
     uint8_t keys[8][32] = {{0}}, result[64] = {1, 1}, uuid[16]; uint32_t status = DM_FRIENDS_HISTORY_FAIL;
     dm_guest_host_wait_begin(); pthread_mutex_lock(&history_lock);
-    if ((key_provider ? key_provider(keys) : firmware_keys(keys)) && local_uuid(uid, uuid)) {
+    static int told;   // which keys sign, logged once
+    // The firmware's keyring when present; this device's own only when there is none (a present but unusable keyring fails, as before)
+    int firmware = key_provider ? (key_provider(keys) ? 1 : -1) : firmware_keys(keys);
+    int source = firmware == 1 ? 1 : !firmware && device_keys(keys) ? 2 : 0;
+    if (!told) {
+        told = 1;
+        if (source == 2) fprintf(stderr, "[dm] friends: play-history keys: this device's own (no %s/010000000000000e/files/play-history.keyring): local play with other "
+                                         "nxnative devices works, a console's friends service would not accept them\n", getenv("DM_SYSTEM_DATA_DIR") ?: "<DM_SYSTEM_DATA_DIR>");
+        else if (!source) fprintf(stderr, "[dm] [RED] friends: no play-history keys (%s): games that ask for a play-history key, Mario Kart 8 Deluxe before a "
+                                          "local-wireless room, stop there\n", firmware ? "the firmware keyring is there but unusable" : "this device's own could not be kept");
+    }
+    if (source && local_uuid(uid, uuid)) {
         uint8_t index; history_random(&index, 1); result[2] = index & 7; result[4] = input_flag & 1;
         memcpy(result+16, uuid, sizeof uuid);
         CCHmac(kCCHmacAlgSHA256, keys[result[2]], 32, result, 32, result+32);
