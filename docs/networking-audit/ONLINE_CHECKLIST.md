@@ -13,11 +13,11 @@ Status: **done** (in the fork), **verify** (written, waiting for a device log), 
 | OAuth sign-in with PKCE and a loopback redirect | launcher (Swift) | iOS launcher (Swift), user-supplied client ID | `nextendo_login_apple.inc`, rewritten under MIT | done |
 | Saved sign-in | Keychain | Keychain | private file (0600) in the app container | done; Keychain is optional |
 | Game token (`/api/nex-token`, nx2) | yes | yes | yes | done |
-| Why an account may not play (`/api/online-status`) | launcher | not checked | sign-in error text | done |
+| Why an account may not play (`/api/online-status`) | launcher | not checked | sign-in error text; the log at the first game sign-in and after a 2306-08xx error | done; not yet seen on a device |
 | Own registered OAuth client ID | its own | user enters one | a build setting (`DM_NEXTENDO_CLIENT_ID`); the fork's workflow sets Mush8's, borrowed | todo: register one at nextendo.network/developers |
 | BaaS id token with the `nnex` proof | yes | yes (#961) | yes | done (Wonder online works) |
 | `GetNetworkServiceAccountId` = Nextendo PID | yes | yes | yes | done |
-| Nickname, country, birthday from `/api/me` | nickname, country | country (#961) | all three | done |
+| Nickname, country, birthday from `/api/me` | nickname, country | country (#961) | all three, with the OAuth access token (`/api/me` refused the nx2 token with 401 until 2026-11-14) | done; the access token not yet seen on a device |
 | Online membership (`hm`, license kind) | yes | `hm` (#961) | yes | done |
 
 ## Network plumbing
