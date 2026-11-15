@@ -341,9 +341,23 @@ static void discovery_peer(void) {
           "capable host retains native discovery destination");
     CLOSE(guest); close(native);
 }
+// The UDP watch: a socket that sends and never receives is logged once, 2 s after its first send (hle_net_backend.c net_udp_note)
+static void udp_unheard(void) {
+    int guest = SOCKET(2, 2, 17); address local = addr(htonl(0x7f000001), 0), peer = local;
+    CHECK(guest >= 0 && BIND(guest, &local, sizeof local) == 0, "UDP watch socket binds");
+    int native = native_udp(&peer);   // bound, never answers
+    char path[] = "/tmp/t_net_watch_XXXXXX"; int log = mkstemp(path), saved = dup(2);
+    fflush(stderr); dup2(log, 2);
+    SEND(guest, "a", 1, 0, &peer, 16); struct timespec wait = {2, 200000000}; nanosleep(&wait, NULL); SEND(guest, "b", 1, 0, &peer, 16);
+    fflush(stderr); dup2(saved, 2); close(saved);
+    char text[512] = {0}; lseek(log, 0, SEEK_SET); ssize_t got = read(log, text, sizeof text - 1); close(log); unlink(path);
+    char want[96]; snprintf(want, sizeof want, "net: UDP socket %d: nothing received 2 s after its first send (2 sent so far)", guest);
+    CHECK(got > 0 && strstr(text, want), "a UDP socket that sent for 2 s and heard nothing is logged once, with its count");
+    close(native); CLOSE(guest);
+}
 int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = sigpipe}; sigemptyset(&sa.sa_mask); sigaction(SIGPIPE, &sa, NULL);
-    offline(); nifm(); udp(); eventfd_net(); concurrency(); tcp(); errors_and_resolver(); discovery_peer();
+    offline(); nifm(); udp(); udp_unheard(); eventfd_net(); concurrency(); tcp(); errors_and_resolver(); discovery_peer();
     if (argc == 2 && !strcmp(argv[1], "--no-broadcast")) puts("broadcast test skipped explicitly (requires local-network permission for this test executable)"); else broadcast();
     GET(fn_vvoid, "_ZN2nn6socket8FinalizeEv")();
     CHECK(atomic_load(&waits) > 0 && atomic_load(&wait_balance) == 0, "all host waits yield and restore guest execution");

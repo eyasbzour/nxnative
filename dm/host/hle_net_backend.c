@@ -210,9 +210,12 @@ static void net_trace(const char *op, int fd, long result) {
 // The UDP watch. A game's own peer-to-peer traffic (Mario Kart 8 Deluxe's races, through Pia) ends without any host error when datagrams stop
 // coming: the game times its peers out and shows its communication error, and the log said nothing. Each UDP socket counts what it sends and
 // receives; one that has received and then gets nothing for NET_UDP_QUIET_MS is logged once, with its counts, and again when datagrams come back,
-// so a log shows which side went quiet. A send or receive error is logged the first time each errno appears. No addresses: the peers are other players
+// so a log shows which side went quiet. One that has sent for NET_UDP_QUIET_MS and never received is logged once too, and again at its first datagram:
+// a Mario Kart 8 Deluxe match that never connected (2618-0519) sent and heard nothing, and the watch said nothing. A socket that only sends (a local
+// broadcast) logs that line once as well, so it is not [RED]. A send or receive error is logged the first time each errno appears. No addresses: the
+// peers are other players
 enum { NET_UDP_QUIET_MS = 2000 };
-typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms; int quiet; } net_udp_watch;
+typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms, first_out_ms; int quiet, unheard; } net_udp_watch;
 static net_udp_watch g_udp_watch[NET_MAX];
 static pthread_mutex_t g_udp_watch_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_udp_errors_told[2];   // bit n: errno n already logged (receive, send)
@@ -226,11 +229,18 @@ static void net_udp_note(const net_ref *r, int received, int sent) {
     uint64_t now = net_ms(); char line[160]; line[0] = 0;
     pthread_mutex_lock(&g_udp_watch_lock);
     net_udp_watch *w = net_udp_entry(r);
+    if (sent && !w->first_out_ms) w->first_out_ms = now;
     w->in += (uint64_t)received; w->out += (uint64_t)sent;
     if (received) {
         if (w->quiet) snprintf(line, sizeof line, "net: UDP socket %d: datagrams again after %.1f s without (in %llu, out %llu)", r->guest,
                                (now - w->quiet_since_ms) / 1000.0, (unsigned long long)w->in, (unsigned long long)w->out);
-        w->quiet = 0; w->last_in_ms = now;
+        else if (w->unheard) snprintf(line, sizeof line, "net: UDP socket %d: first datagram %.1f s after its first send (out %llu)", r->guest,
+                                      (now - w->first_out_ms) / 1000.0, (unsigned long long)w->out);
+        w->quiet = 0; w->unheard = 0; w->last_in_ms = now;
+    } else if (!w->in && w->first_out_ms && !w->unheard && now - w->first_out_ms >= NET_UDP_QUIET_MS) {
+        w->unheard = 1;
+        snprintf(line, sizeof line, "net: UDP socket %d: nothing received %d s after its first send (%llu sent so far)", r->guest,
+                 NET_UDP_QUIET_MS / 1000, (unsigned long long)w->out);
     } else if (w->in && !w->quiet && now - w->last_in_ms >= NET_UDP_QUIET_MS) {
         w->quiet = 1; w->quiet_since_ms = w->last_in_ms;
         snprintf(line, sizeof line, "[RED] net: UDP socket %d: no datagram for %d s after %llu in (%llu sent so far)", r->guest,
