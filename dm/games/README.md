@@ -99,6 +99,8 @@ One row per profile; the notes are each profile's `README.md`.
 | [FINAL FANTASY RESONANCE](0100606026F12000/README.md) | `0100606026F12000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY RESONANCE, Asian release](0100B8A026F14000/README.md) | `0100B8A026F14000` | 1.0.1 | 20.5.17 | Unreal Engine 5.6.1 | NVN |
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](010038B015560000/README.md) | `010038B015560000` | 1.4.0 | 19.3.9 | Square Enix's engine | NVN |
+| [FINAL FANTASY V](0100AA201415C000/README.md) | `0100AA201415C000` | 1.2.0_5 | 14.3.0 | Unity 2020.3.37f1 IL2CPP | NVN |
+| [FINAL FANTASY VI](0100AA001415E000/README.md) | `0100AA001415E000` | 1.2.1_5 | 14.3.0 | Unity 2020.3.37f1 IL2CPP | NVN |
 | [FINAL FANTASY X/X-2 HD Remaster](0100BC300CB48000/README.md) | `0100BC300CB48000` | 1.0.0 (base) | 5.4.0 | PhyreEngine (Virtuos) | NVN |
 | [FINAL FANTASY XII THE ZODIAC AGE](0100EB100AB42000/README.md) | `0100EB100AB42000` | 1.1.0 | 6.4.0 | PhyreEngine | NVN |
 | [Fast Fusion](040041E0212AE000/README.md) | `040041E0212AE000` | v262144 (Switch 2) | 20.5.13 (Ounce) | Shin'en's engine | NVN2 |
@@ -143,6 +145,7 @@ One row per profile; the notes are each profile's `README.md`.
 | [Orbitals](040032B023CA4000/README.md) | `040032B023CA4000` | 1.1.2.0 (Switch 2) | 21.4.2 (Ounce) | Unreal Engine 5.6.1, Wwise, Bink 2 | NVN2 |
 | [Ori and the Blind Forest: Definitive Edition](010061D00DB74000/README.md) | `010061D00DB74000` | 1.0.2 | 8.2.0 | Unity 2018.4.1f1 IL2CPP, FMOD | NVN |
 | [Ori and the Will of the Wisps](01008DD013200000/README.md) | `01008DD013200000` | 1.2.1 | 9.4.0 | Unity 2018.4.24f1 IL2CPP, Wwise | NVN |
+| [Overcooked! All You Can Eat](0100F28011892000/README.md) | `0100F28011892000` | 1.0.12 | 10.4.1 | Unity 2019.4.11f1 IL2CPP, FMOD | NVN |
 | [Paper Mario: The Origami King](0100A3900C3E2000/README.md) | `0100A3900C3E2000` | 1.0.1 | 8.3.1 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Paper Mario: The Thousand-Year Door](0100ECD018EBE000/README.md) | `0100ECD018EBE000` | 1.0.1 | 15.3.2 | Intelligent Systems' engine on NintendoWare | NVN |
 | [Patrick's Parabox](0100E44016C22000/README.md) | `0100E44016C22000` | 1.0.1 | 13.3.7 | Unity 2020.3.30f1 IL2CPP | NVN |

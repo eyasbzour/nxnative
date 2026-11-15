@@ -294,6 +294,30 @@ static void ws_report(uint64_t frame, uint64_t frames) {
         if (n && o < sizeof line - 160) o += snprintf(line + o, sizeof line - o, " %s %.2f/frame (blocked %.2f, %.3f ms);", ws_name[i], (double)n / frames, (double)b / frames, ns / 1e6 / frames); }
     MLOG("[waits] up to frame %llu, per frame:%s", (unsigned long long)frame, o ? line : " none");
 }
+static _Atomic uint64_t g_sub_cmt;   // the last submission whose commit the encode thread has made (its fence; with no encode thread, the last committed: mtl_sub_commit)
+// A main command buffer's commit feedback, kept as blocks: the feedback of several submissions can then ride on one commit (nvn_rec.h, submissions merged into one command buffer)
+@interface DmCommitFB : NSObject { @public NSMutableArray *blocks; }
+- (void)addFeedbackHandler:(void (^)(id<MTL4CommitFeedback>))b;
+@end
+@implementation DmCommitFB
+- (instancetype)init { if ((self = [super init])) blocks = [NSMutableArray array]; return self; }
+- (void)addFeedbackHandler:(void (^)(id<MTL4CommitFeedback>))b { [blocks addObject:[b copy]]; }
+@end
+// The feedback one merged submission's blocks get: the command buffer's error and that submission's own part of its GPU time
+@interface DmPartFB : NSObject { @public double t0, t1; NSError *err; }
+@end
+@implementation DmPartFB
+- (CFTimeInterval)GPUStartTime { return t0; }
+- (CFTimeInterval)GPUEndTime { return t1; }
+- (NSError *)error { return err; }
+@end
+static MTL4CommitOptions *commit_opts(DmCommitFB *fb) {
+    if (!fb) return nil;
+    MTL4CommitOptions *o = [MTL4CommitOptions new]; NSArray *bl = fb->blocks;
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { for (void (^b)(id<MTL4CommitFeedback>) in bl) b(f); }];
+    return o;
+}
+static id<MTL4CounterHeap> g_ts_heap;   // tentative: defined with the segment timestamps below
 #include "nvn_rec.h"   // deferred encoding (DM_NVN_ENC_THREAD)
 static NSHashTable *g_res_objects;
 static _Atomic unsigned g_image_heap_n, g_big_n;   // g_big_n: large pools in chunks, whose buffers overlap (BIG_MIN)
@@ -2295,11 +2319,11 @@ static uint64_t gpu_ticks(void) { return nvn_timestamp_from_ns(guest_ns()); }
 // so a game that waits for the fence reads one submission's reports together; a segment whose feedback has not arrived by then takes the last segment's times
 #define SEG_CLK_N 1024
 struct seg_clk { _Atomic int refs; _Atomic uint64_t t[SEG_CLK_N][2]; uint32_t nb, ncm; uint16_t b[SEG_CLK_N + 1], cm[SEG_CLK_N]; uint64_t begin; };   // per submission (g_sclk, allocated at its first report, boundary or cut): guest ns of each cut segment's GPU start / end (0 = no feedback yet); b: with ts_on, the heap slots of the segment boundaries, segment k from b[k] to b[k + 1]; cm: the segments that ended a command buffer (sub_cut's commits), in order
-static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment with the GPU's idle gaps kept (seg_idle_before)
+static int ts_mode(void) {   // 0 submission, 1 segment (the default), 2 segment with the GPU's idle gaps kept (seg_idle_before), 3 segment with the waits before submissions kept (sub_place)
     static int v = -1;
     if (v < 0) { const char *e = getenv("DM_NVN_GPU_TS"); v = 1;
-        if (e && *e) { if (!strcmp(e, "submission")) v = 0; else if (!strcmp(e, "segment_gaps")) v = 2; else if (strcmp(e, "segment")) MLOG("[RED] DM_NVN_GPU_TS=%s: not segment, segment_gaps or submission; segment stands", e); }
-        MLOG("counter timestamps: %s (DM_NVN_GPU_TS=segment / segment_gaps / submission)", v == 0 ? "one time for the whole submission" : v == 1 ? "GPU start / end time of their segment, without the GPU's idle time between command buffers" : "GPU start / end time of their segment, the GPU's idle time between command buffers included"); }
+        if (e && *e) { if (!strcmp(e, "submission")) v = 0; else if (!strcmp(e, "segment_gaps")) v = 2; else if (!strcmp(e, "segment_submit_gaps")) v = 3; else if (strcmp(e, "segment")) MLOG("[RED] DM_NVN_GPU_TS=%s: not segment, segment_submit_gaps, segment_gaps or submission; segment stands", e); }
+        MLOG("counter timestamps: %s (DM_NVN_GPU_TS=segment / segment_submit_gaps / segment_gaps / submission)", v == 0 ? "one time for the whole submission" : v == 1 ? "GPU start / end time of their segment, without the GPU's idle time the host's translation caused (between command buffers and between submissions)" : v == 3 ? "GPU start / end time of their segment, without the GPU's idle time between command buffers" : "GPU start / end time of their segment, the GPU's idle time between command buffers included"); }
     return v;
 }
 static int seg_ts(void) { return ts_mode() > 0; }
@@ -2310,12 +2334,19 @@ static uint64_t gpu_s_guest_ns(double s) {   // a feedback GPU time (seconds on 
     double age = (double)now - s * 1e9;
     return s > 0 && age >= 0 && age < (double)g ? g - (uint64_t)age : 0;
 }
-// The GPU's idle time in a submission before a time on the guest clock: the gaps between its command buffers. A Switch GPU runs a submission's commands back to back; here it waits at each
-// of sub_cut's commits while the host translates up to the next one (a commit is made only once the GPU has run out of work), and a game that times its GPU work as the difference of two
-// reports read that wait as GPU time. agl's dynamic resolution (Mario Kart World, Donkey Kong Bananza, Splatoon Raiders) then saw its budget exceeded, stepped its render size down and up
-// again from frame to frame, and thin distant geometry flickered (Mario Kart World's mountains and bridges, 5-6 ms of gaps a frame on an M5: GitHub PR #1350; Splatoon Raiders read 16 ms
-// where the GPU worked 8: issue #1290). Lowering the resolution cannot shorten the host's translation, so the gaps are left out. A gap counts once the time is past its middle: a boundary's
-// heap stamp is written either in the command buffer before the commit or at the start of the next, never inside the gap. A command buffer with no feedback yet gives no gap.
+// The GPU timeline counter reports read (DM_NVN_GPU_TS=segment, the default): where a Switch GPU would have run each command buffer. A Switch GPU runs a submission's commands back to
+// back, and starts a submission as soon as the one before it ends, or once it is ready if that is later: the game's nvnQueueSubmitCommands, or the passing of a queue wait it was held
+// for (mtl_sub_ready). Here the GPU also waits while the host translates: at each of sub_cut's commits inside a submission (a commit is made only once the GPU has run out of work), and
+// before a submission the game had submitted while the one before still ran. A game that times its GPU work as the difference of two reports read that wait as GPU time, and agl's
+// dynamic resolution stepped its render size down for it, which cannot shorten the host's translation: Mario Kart World stepped down and up from frame to frame and thin distant geometry
+// flickered (5-6 ms of gaps between command buffers a frame on an M5: GitHub PR #1350), Splatoon Raiders read 16 ms where the GPU worked 8 (issue #1290), and Nintendo Switch Sports
+// Resort, which submits a frame's three submissions within 0.2 ms, read 14.3 ms where the GPU worked 12 (each waited 1.3-2.6 ms for its translation) and stayed at 854x480 (PR #2491).
+// So each command buffer is placed at the later of the timeline's end and its submission's ready time, and a report moves back by how much later the real GPU ran its command buffer
+// (place_back): the offset of the submission's first command buffer (sub_place), and for each later one the gaps before it (seg_idle_before), as a submission is ready all at once.
+// A report never moves before its submission was ready, so the game's own waits (its CPU work, the present, its pacing) stay in, nor after the real GPU ran it.
+// DM_NVN_GPU_TS=segment_submit_gaps keeps the wait before each submission, segment_gaps the gaps inside one as well.
+// seg_idle_before: the gaps between a submission's command buffers before a time on the guest clock. A gap counts once the time is past its middle: a boundary's heap stamp is written
+// either in the command buffer before the commit or at the start of the next, never inside the gap. A command buffer with no feedback yet gives no gap.
 // c0: the GPU start of the submission's last command buffer
 static uint64_t seg_idle_before(seg_clk *sc, uint64_t ns, uint64_t c0) {
     uint64_t idle = 0;
@@ -2325,7 +2356,12 @@ static uint64_t seg_idle_before(seg_clk *sc, uint64_t ns, uint64_t c0) {
     }
     return idle;
 }
-static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock
+static uint64_t place_back(seg_clk *sc, uint64_t ns, uint64_t c0, uint64_t off) {   // how far a report at ns moves back on the timeline; off: its submission's (sub_place)
+    int m = ts_mode(); uint64_t back = off;
+    if (sc && (m == 1 || m == 3)) back += seg_idle_before(sc, ns, c0);
+    return back < ns ? back : 0;
+}
+static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t c0, uint64_t c1, uint64_t off) {   // the time a counter report records (614.4 MHz); c0 / c1: the last segment's GPU start / end on the guest clock; off: sub_place's
     int top = o->type == 0x10; uint64_t ns = 0;
     uint32_t bi = o->seg + !top;
     if (sc && bi < sc->nb && g_ts_heap) {   // Map the GPU boundary through the paired CPU sample. Reading the guest clock later adds CPU scheduling delay to the timestamp.
@@ -2339,7 +2375,7 @@ static uint64_t rep_ticks(const post_op *o, seg_clk *sc, uint32_t last, uint64_t
     }
     if (!ns && sc && o->seg < last && o->seg < SEG_CLK_N) ns = atomic_load(&sc->t[o->seg][!top]);
     if (!ns) ns = top ? c0 : c1;
-    if (ns && sc && ts_mode() == 1) { uint64_t idle = seg_idle_before(sc, ns, c0); if (idle < ns) ns -= idle; }
+    if (ns) ns -= place_back(sc, ns, c0, off);
     return ns ? nvn_timestamp_from_ns(ns) : gpu_ticks();
 }
 
@@ -2498,7 +2534,7 @@ static void cbs_fly_report(uint64_t fence); static void cbs_fly_put(uint64_t fen
 static void lc_land(void);
 // A submission's CPU-side writes at its end (events, samples-passed and counter reports): run once, by its feedback handler or, when a game's SyncWait wakes on the
 // GPU's own signal of the fence first, by that waiter (DM_NVN_FAST_WAKE, on by default): the feedback handler comes 0.26 ms after the GPU end on an M2 Max
-typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit; } post_rec;   // t_commit: guest ns when it was committed
+typedef struct { _Atomic uint64_t fence; _Atomic int claimed; int n; post_op *ops; seg_clk *sc; uint32_t seg_last; uint64_t t_commit, t_ready; } post_rec;   // t_commit: guest ns when it was committed; t_ready: when it was ready to run (mtl_sub_ready, 0 = not known)
 // One record per submission in flight: mtl_sub_begin lets at most ALLOC_MAX allocators of ALLOC_SHARE submissions each stand uncompleted, so the submission that reuses a slot
 // comes after the one that last held it has completed and run its writes (post_complete runs every record up to a fence before it raises g_done). 128 records, sized for one
 // allocator per submission, wrapped once allocators were shared (PR #2090): Super Mario Party's 70-80 submissions a frame overran them two frames behind the feedback (PR #2469)
@@ -2512,11 +2548,29 @@ static int post_claim(post_rec *r, uint64_t fence) {
     if (r->fence != fence || r->claimed) { pthread_mutex_unlock(&g_post_mu); return 0; }
     return 1;
 }
+// A submission's place on the GPU timeline (see place_back), in fence order: post_complete runs the records up to a fence in order, each post_run under g_post_mu. Returns how far its
+// first command buffer moves back. With no ready time (replay tools, tests), its first command buffer's feedback not arrived yet, or no GPU times, it stays where it is. Every submission,
+// moved or not, sets the timeline's end to its own end as its reports read it, so no later report reads earlier than one of it. A submission completed by a SyncWait that woke on the
+// GPU's signal before its feedback (post_early) is placed by the times post_complete estimates for it
+static uint64_t g_line_fence, g_line_end;   // the last submission placed, and the timeline's end (guest ns)
+static uint64_t sub_place(const post_rec *r, uint64_t c0, uint64_t c1) {
+    uint64_t fence = atomic_load(&r->fence);
+    if (ts_mode() != 1 || fence <= g_line_fence) return 0;
+    uint64_t s = c0, gaps = 0, off = 0;   // its first command buffer's real GPU start, and the gaps between its command buffers
+    if (r->sc && r->sc->ncm) { s = atomic_load(&r->sc->t[r->sc->cm[0]][0]); gaps = seg_idle_before(r->sc, c1, c0); }
+    uint64_t end = c1 ? c1 : guest_ns();   // its end as its last report reads it unmoved (rep_ticks: with no GPU end, the time of the write)
+    if (gaps < end) end -= gaps;
+    if (r->t_ready && s && c1 >= s) { uint64_t at = g_line_end > r->t_ready ? g_line_end : r->t_ready; if (at < s) { off = s - at; end -= off; } }
+    if (end > g_line_end) g_line_end = end;
+    g_line_fence = fence;
+    return off;
+}
 static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
     // A guest SyncWait may run completion on a thread whose outer pool never drains.
     // MTLBuffer.contents may autorelease its receiver; keep that lifetime inside the completed copy.
     @autoreleasepool {
     int n = r->n; post_op *ops = r->ops; seg_clk *sc = r->sc; uint32_t seg_last = r->seg_last;
+    uint64_t off = sub_place(r, c0, c1);
     for (int i = 0; i < n; i++) {
         if (ops[i].kind == 1) continue;   // A terminal release publishes after every earlier GPU write has landed.
         else if (ops[i].kind == 3) {   // Samples passed: the running total, in submission order
@@ -2525,7 +2579,7 @@ static void post_run(post_rec *r, uint64_t c0, uint64_t c1) {
             for (int k = 0; k < l->n; k++) { g_vis_acc += ((const uint64_t *)((__bridge id<MTLBuffer>)l->s[k].buf).contents)[l->s[k].slot]; CFRelease(l->s[k].buf); }
             free(l); if (ops[i].mode == VIS_REPORT) { uint64_t rec[2] = {g_vis_acc, gpu_ticks()}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
-        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
+        else { uint64_t t = rep_ticks(&ops[i], sc, seg_last, c0, c1, off), rec[2] = {0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }   // a timestamp report's counter field is 0, as on the GPU (see rc_value)
     }
     // Forwarded counter values expire once their CPU-visible reports have landed.
     // This precedes event publication so a released CPU writer is never hidden by stale knowledge.
@@ -2556,19 +2610,35 @@ static void post_complete(uint64_t fence, uint64_t c0, uint64_t c1) {
     pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
     nvn_queue_gpu_progress();
 }
+static uint64_t g_sub_ready;   // mtl_sub_ready, for the submission being encoded
+void mtl_sub_ready(uint64_t t) { g_sub_ready = t; }
 static _Atomic int g_seg_inflight;   // main command buffers committed and not reported back yet (sub_cut)
 static void rt_preserve_bound(void);
 static void queue_program_preserve(void);
 static void vc_commit(void);
+// Every commit of the submission's command buffer (mtl_sub_commit, sub_cut, mdi_wait) ends it through cb_commit, so that none misses a step: mdi_wait committed without patching the raw
+// pool table words until PR #2330. Sealed first: the transform feedback pass (its saves are blits), the blit encoder, the upload batch (its own command buffer, committed before this one) and the
+// raw pool table words of the argument blocks encoded so far (gmem_commit_patch); then the residency set. A commit whose bookkeeping must see all of that (the submission's fence and the writes
+// it counts, a segment's state list) seals before it: cb_commit seals again and finds nothing left to do
+static void cb_seal(void) {
+    if (g_tf_enc) tf_pass_end();
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    up_flush();
+    gmem_commit_patch();
+}
+static void cb_commit(DmCommitFB *o, int end) {   // end: the submission ends with this command buffer (rec_commit)
+    cb_seal();
+    res_commit();
+    [g_cb endCommandBuffer];
+    rec_commit(g_cb, o, end); g_cbgen++;
+}
 uint64_t mtl_sub_commit(void) {
     if (g_tf_enc) tf_pass_end();   // the capture pass and the saves it holds (nvn_feedback.inc), before this submission's writes are counted
     lc_land();   // clears still waiting (the command list ends with them)
     defer_fallback();   // Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
     rp_flush(); ubd_land();
     g_ts_pend = -1;   // nothing after it: the last segment's end is the command buffer's own (rep_ticks)
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    up_flush();
-    gmem_commit_patch();
+    cb_seal();   // before the fence and the writes it counts
     g_cut_copy = 0;
     own_ghost_trim();   // idle finalized textures past the ghost table's size go behind this submission's fence
     vc_commit();   // and the texture views of the textures the owner has let go, those evictions among them
@@ -2584,7 +2654,7 @@ uint64_t mtl_sub_commit(void) {
     if (ws_on()) for (int i = 0; i < n; i++) { int k = g_post[i].kind == 2 ? (g_post[i].type == 0 || g_post[i].type == 0x10 ? 3 : 4) : g_post[i].kind == 3 ? (g_post[i].mode == VIS_REPORT ? 2 : 0) : 1; atomic_fetch_add(&g_ws_post[k], 1); }   // 1 event, 2 samples passed, 3 timestamp, 4 other counter
     if (n) memcpy(ops, g_post, n * sizeof *ops);
     NSArray<dispatch_block_t> *commit_blocks = [g_commit_blocks copy];
-    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    DmCommitFB *o = [DmCommitFB new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; atomic_fetch_sub(&g_seg_inflight, 1); for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
@@ -2593,7 +2663,7 @@ uint64_t mtl_sub_commit(void) {
     seg_clk *sc = g_sclk; uint32_t seg_last = g_seg; g_sclk = NULL;
     pthread_mutex_lock(&g_post_mu);
     if (!atomic_load(&pr->claimed) && pr->fence) MDIE("post ring: the writes of fence %llu never ran, %d submissions on (more in flight than the allocator pool allows)", (unsigned long long)pr->fence, POST_RING);
-    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
+    pr->n = n; pr->ops = ops; pr->sc = sc; pr->seg_last = seg_last; pr->t_commit = guest_ns(); pr->t_ready = g_sub_ready; g_sub_ready = 0; atomic_store(&pr->claimed, 0); atomic_store(&pr->fence, fence);
     pthread_mutex_unlock(&g_post_mu);
     int lost_test = gpu_lost_test();
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
@@ -2608,14 +2678,18 @@ uint64_t mtl_sub_commit(void) {
         defer_drain(); defer_idle_commit();
     }];
     void arena_commit(uint64_t fence); arena_commit(fence);
-    res_commit();
     if (g_gp_state == 1 && !gp_active()) { int gn = g_gp_n; gp_lab *gl = malloc(sizeof(gp_lab) * (gn ? gn : 1)); memcpy(gl, g_gp_lab, sizeof(gp_lab) * gn); uint64_t gf = g_gp_frame; g_gp_state = 2; atomic_store(&g_gp_busy, 1);
         [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; gp_report(gn, gl, gf); }]; }
-    if (g_tf_enc) tf_pass_end();
-    [g_cb endCommandBuffer];
-    rec_commit(g_cb, o); g_cbgen++;   // the stores it holds come before any later upload batch (gsb_held)
+    cb_commit(o, 1);   // the stores it holds come before any later upload batch (gsb_held)
     if (!lost_test) rec_signal(g_ev, fence);
-    rec_drain();
+    // With the encode thread the records go to it and the replay goes on with the next submission: what comes after it on the queue is a record too (the next submission's commits,
+    // upload batches, snapshot copies), a CPU wait for the GPU waits for the fence's signal behind this commit, and a present of the game's own texture waits for this note
+    // (sub_commit_wait). The replay used to wait for the encode thread here: Ocarina of Time makes about 30 submissions a frame (one at each event signal), and on the iPhone the GPU
+    // sat idle before most of them while the replay waited and then translated the next one (13.6 of 14.8 ms of gaps in a 35 ms frame; docs/reference/rendering.md)
+    // DM_NVN_SUB_DRAIN=1 waits for the encode thread here as before (ab: alternates with the DM_AB phases, for measurement)
+    static int drain = -1; if (drain < 0) drain = sw_mode("DM_NVN_SUB_DRAIN", 0);
+    if (rec_on() && g_rb_started) { rec_t *r = rec_put(RO_NOTE, 0); r->a[0] = (uint64_t)(uintptr_t)&g_sub_cmt; r->a[1] = fence; if (drain && sw_on(drain)) rec_drain(); else rec_publish(); }
+    else atomic_store(&g_sub_cmt, fence);
     g_alloc_fence[g_alloc_cur] = fence;
     g_cb = nil;
     atomic_store(&g_sub_open, 0);   // after ++g_fence and the last encoding: a buffer retired from now on waits for this fence at most
@@ -2625,6 +2699,8 @@ uint64_t mtl_sub_commit(void) {
     return fence;
 }
 
+// A present of the game's own texture waits for the submissions before it (g_sub_cmt), as the display command buffer goes to the queue directly and must come after the work that drew the picture
+static void sub_commit_wait(uint64_t fence) { if (fence && rec_on()) rec_note_wait(&g_sub_cmt, fence); }
 uint64_t mtl_completed_fence(void) { return atomic_load_explicit(&g_done,memory_order_acquire); }
 uint64_t mtl_last_fence(void) { return g_fence; }
 int mtl_last_commit_error(void) { return atomic_load(&g_last_commit_error); }
@@ -5307,7 +5383,7 @@ static int sw_mode(const char *name, int dflt) {
         if (!ab_len()) MLOG("[RED] %s=%s needs DM_AB=<frames>: the switch is off", name, e); }
     else if (e) m = atoi(e) ? 1 : 0;
     if (m >= 2) MLOG("%s: on in the DM_AB phases whose number modulo %d is in the set %#x", name, n, mask);
-    if (g_sw_n < SW_MAX) { g_sw_name[g_sw_n] = name; g_sw_mode[g_sw_n++] = m; }
+    if (m >= 2 && g_sw_n < SW_MAX) { g_sw_name[g_sw_n] = name; g_sw_mode[g_sw_n++] = m; }   // the [ab] lines name the switches that alternate: a table of every switch read filled up before the later ones
     return m;
 }
 static inline int sw_on(int m) { return sw_on_at(m, atomic_load_explicit(&g_ab_phase, memory_order_relaxed)); }
@@ -7030,10 +7106,13 @@ void mtl_tb2_stats(uint64_t *binds, uint64_t *made, uint64_t *fail, uint64_t *co
 // until a shader samples through it, so a game may leave such an ID in a slot a draw binds and does not read, and a walk over every ID (pool_gpu) reaches them all. Unlike the pool
 // object's magic this holds when a new pool takes the old object's address, and it cannot race nvnMemoryPoolFinalize: that sets it under g_rmu before it tears anything down and before
 // the game can free the object, so for a reader holding g_rmu an ID not marked names a pool object that still exists. Under g_rmu
+// Every view the ID caches goes (treg_drop_views), as at a full unregister, behind the open submission's fence: a gone ID is read as the dummy, so nothing reaches them until a
+// registration makes them again. It released only the primary view, and the image view when there was one: the type-compatible view (tex_fit) and the pool tables' views (pool_fit)
+// kept their texture, a pool-backed one the whole pool buffer, until the ID was registered with other data (PR #923; registering the same data keeps the views)
 static void treg_gone(treg_t *r) {
     if (!r->gone) reg_bump((int)(r - g_treg), 0);   // its pool table entries become the dummy: the tables take the ID again (pool_gpu)
     r->gone = 1;
-    if (r->view) { defer_obj_unref((__bridge id)r->view); CFRelease(r->view); r->view = NULL; r->view_id = r->view_rid = 0; treg_drop_im(r); }
+    treg_drop_views(r);
     treg_drop_stand(r);
 }
 static void treg_drop_pool_views(const void *pool) {
@@ -9971,6 +10050,9 @@ static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t 
 // After satisfying the first pipeline miss in a submission, scan ahead once along the remaining commands (replaying state only, no drawing) and kick a bounded number of normal-pass pipelines to the background;
 // when the submit thread reaches that draw it only waits for 'the remaining time not yet compiled'. The compiled pipelines are identical to synchronously compiled ones (same descriptor). Pipeline keys of merged passes / specialized fragments depend on the planning result at replay time, are not predicted, and are compiled synchronously as before.
 #define PSO_PEND_MAX 384
+// PSO_PEND_ACTIVE / PSO_PREDICT_BUDGET bound the guesses only (a key with another depth / stencil attachment than the draw's). The draws the scan met with their attachments as they
+// are come later in this submission, so each of their pipelines is admitted (pso_pend_kick_next), bounded by the table: bounded by 2 as well, a cold load of FINAL FANTASY
+// RESONANCE into Grandshelt Castle waited 2.8 s for pipelines, worst frame 2.2 s, against 0.74-0.79 s (PR #1344)
 enum { PSO_PEND_ACTIVE = 2, PSO_PREDICT_BUDGET = 2 };
 // order: admission order (the oldest finished, untaken entry is reclaimed first); demand: a build a draw asked for while it draws with its pulling stand-in (hybrid pipelines),
 // outside the speculative limit; run: 0 queued, 1 taken by its worker; d: the descriptor while queued (a draw that would wait for a queued build makes the pipeline itself:
@@ -9992,7 +10074,8 @@ static int pso_pend_find(const pso_key *k) { for (int i = 0; i < PSO_PEND_MAX; i
 static int hybrid_on(void);
 // The queue of the builds hybrid draws asked for (the draw has a pulling stand-in, so nothing waits for them): serial queues at utility QoS, one per two performance cores, round
 // robin. At user-initiated QoS on the global queue, a cold start's burst (777 builds on entering Zora's Domain, Breath of the Wild) ran on every core, beside the game's own threads,
-// for the seconds it took. Speculative builds (pso_pend_kick: at most PSO_PEND_ACTIVE at a time) keep the global queue, so a demanded build never waits behind speculation
+// for the seconds it took. The prediction's builds (pso_pend_kick_next, and the guesses of pso_pend_kick: at most PSO_PEND_ACTIVE at a time) keep the global queue: they are draws
+// of this submission that would wait, and a draw that reaches its build while still queued makes it itself (pso_pend_take)
 static dispatch_queue_t pp_bg_queue(void) {
     static dispatch_queue_t q[8]; static int n; static _Atomic unsigned rr; static dispatch_once_t once;
     dispatch_once(&once, ^{ int pc = 0; size_t sz = sizeof pc; if (sysctlbyname("hw.perflevel0.physicalcpu", &pc, &sz, NULL, 0) || pc < 2) pc = 2;
@@ -10004,8 +10087,8 @@ static dispatch_queue_t pp_bg_queue(void) {
 // 3 no pulling entry (layer-writing or transform feedback vertex shader, or no pulling library), 4 pulling base not made yet; count and time (prediction walks left out)
 static uint64_t g_pw_n[5], g_pw_ns[5];
 static const char *const g_pw_why[5] = {"hybrid off", "merged pass or readable tile", "diagnostic fragment", "no pulling entry", "pulling base not made yet"};
-// Takes a slot for k (with g_pp_mu held): a free one, else the oldest finished entry no draw took (its worker no longer touches it). spec: a speculative build, refused while
-// PSO_PEND_ACTIVE speculative builds run. Returns the slot, -1 when refused or k is in the table already
+// Takes a slot for k (with g_pp_mu held): a free one, else the oldest finished entry no draw took (its worker no longer touches it). spec: 0 a demanded build; 1 a speculative guess,
+// refused while PSO_PEND_ACTIVE speculative builds run; 2 a later draw of this submission, speculative but not refused. Returns the slot, -1 when refused or k is in the table already
 static int pso_pend_slot(const pso_key *k, int spec, uint32_t *gen) {
     int slot = -1, reclaim = -1, active = 0;
     if (pso_pend_find(k) >= 0) return -1;
@@ -10014,7 +10097,7 @@ static int pso_pend_slot(const pso_key *k, int spec, uint32_t *gen) {
         else if (!g_pp[i].done) active += !g_pp[i].demand;
         else if (reclaim < 0 || g_pp[i].order < g_pp[reclaim].order) reclaim = i;
     }
-    if (spec && active >= PSO_PEND_ACTIVE) return -1;
+    if (spec == 1 && active >= PSO_PEND_ACTIVE) return -1;
     if (slot < 0) slot = reclaim;
     if (slot < 0) return -1;
     g_pp[slot].k = *k; g_pp[slot].ps = nil; g_pp[slot].d = nil; g_pp[slot].done = g_pp[slot].run = 0; g_pp[slot].used = 1; g_pp[slot].demand = !spec;
@@ -10032,14 +10115,19 @@ static void pso_pend_start(int slot, uint32_t gen, MTLRenderPipelineDescriptor *
         pthread_mutex_lock(&g_pp_mu); if (g_pp[slot].gen == gen) { g_pp[slot].ps = ps; g_pp[slot].done = 1; } pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu); g_pp_done_n++;
     });
 }
-static int pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // Nonblocking admission of a speculative build: no speculative backlog in front of a demanded compile
+static int pso_pend_kick_(const pso_key *k, NvShader *vs, NvShader *fs, int spec) {
     if (hm_get_id(&g_pso, k)) return 0;
-    pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, 1, &gen); pthread_mutex_unlock(&g_pp_mu);
+    pthread_mutex_lock(&g_pp_mu); uint32_t gen = 0; int slot = pso_pend_slot(k, spec, &gen); pthread_mutex_unlock(&g_pp_mu);
     if (slot < 0) return 0;
     PD("J pipeline source=predict key=%016llx vs=%s fs=%s depth=%u stencil=%u samples=%u", (unsigned long long)nvn_hm_hash(k, sizeof *k), vs->key, fs ? fs->key : "-", k->dfmt, k->sfmt, k->samples);
     pso_pend_start(slot, gen, pso_desc(k, vs, fs, nil, 0), !k->border, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
     return 1;
 }
+// Nonblocking admission of a speculative guess: no speculative backlog in front of a demanded compile
+static int pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) { return pso_pend_kick_(k, vs, fs, 1); }
+// A later draw of this submission as the scan met it, which would wait for its pipeline: admitted whatever runs. Its draw takes it when built, or makes it at once while it is
+// still queued (pso_pend_take), so it never waits behind the others; the Metal compiler service builds them side by side
+static int pso_pend_kick_next(const pso_key *k, NvShader *vs, NvShader *fs) { return pso_pend_kick_(k, vs, fs, 2); }
 // The build a hybrid draw asked for while it draws with its stand-in: outside the speculative limit, on pp_bg_queue
 static int pso_pend_demand(const pso_key *k, NvShader *vs, NvShader *fs) {
     if (hm_get_id(&g_pso, k)) return 0;
@@ -11684,7 +11772,7 @@ static id<MTLBuffer> gmem_map(void) {
 static uint64_t gmem_map_gpu(void) { return gmem_map().gpuAddress; }
 // An argument block holds the pool table that was current when it was encoded. A pool made after that, later in the submission or on another thread while it is encoded, is not in it, and a raw
 // read of that pool gets 0: the failure that hung agl's task shaders (docs/reference/shaders.md, More memory pools than the raw pool table had entries). The GPU has not read the blocks of the
-// command buffer yet, so at each commit, whole or segment, their table words are pointed at a table of the pools as they are then (as #1407 does). A new table is built when the pools changed,
+// command buffer yet, so at each commit, whole, segment or before a count wait (mdi_wait), their table words are pointed at a table of the pools as they are then (as #1407 does). A new table is built when the pools changed,
 // not refilled in place, as earlier segments may be reading the old one. A block's write log is a bitmap of the entries of the table the shader searches: its word follows its table, and the log is
 // read against that table (NvGmlLog), else a bit of the newer table would be decoded against the older one. Counted in the memory report: the words, those that held an older table than the
 // current one, and those that held the current one behind the pools
@@ -12886,16 +12974,18 @@ static void pso_predict_rest_(void) {
         state_op(hq.op, aq);
     }
     (void)df; (void)sf;
-    // Main's demand-first budget: at most PSO_PREDICT_BUDGET new speculative builds. A predicted key whose base is made needs no compile (pso_base_made) and takes nothing here.
-    // With hybrid pipelines a predicted draw whose pulling stand-in is ready (made here, from its base made or archived: the work its draw would do) will not wait, and builds
-    // its own pipeline on demand (pso_pend_demand); the budget goes to the draws that would wait (a pair whose pulling base is not made yet)
+    // Demand first: this runs after the draw's own pipeline is built. A predicted key whose base is made needs no compile (pso_base_made) and takes nothing here. With hybrid
+    // pipelines a predicted draw whose pulling stand-in is ready (made here, from its base made or archived: the work its draw would do) will not wait, and builds its own pipeline
+    // on demand (pso_pend_demand). The rest are draws that would wait (a pair whose pulling base is not made yet): each draw met with its attachments as they are (qa) is
+    // admitted, then at most PSO_PREDICT_BUDGET guesses with other depth / stencil attachments (qb)
     int admitted = 0, hy = hybrid_on();
-    for (int i = 0; i < na + nb && admitted < PSO_PREDICT_BUDGET; i++) {
+    for (int i = 0; i < na + nb && (i < na || admitted < PSO_PREDICT_BUDGET); i++) {
         const pso_key *qk = i < na ? &qa[i].k : &qb[i - na].k; NvShader *qv = (__bridge NvShader *)(i < na ? qa[i].vs : qb[i - na].vs), *qf = (__bridge NvShader *)(i < na ? qa[i].fs : qb[i - na].fs);
         if (hm_get_id(&g_pso, qk)) continue;
         if (pso_base_made(qk, qv, qf)) { hm_put_id(&g_pp_easy, qk, NSNull.null); continue; }
         if (hy && hybrid_get(qk, qv, qf) != nil) continue;
-        admitted += pso_pend_kick(qk, qv, qf);
+        if (i < na) g_pp_admit += (uint64_t)pso_pend_kick_next(qk, qv, qf);
+        else admitted += pso_pend_kick(qk, qv, qf);
     }
     g_pp_admit += (uint64_t)admitted;
     memcpy(&S, &Ssave, sizeof S); R.sc = sc0; R.has_sc = has_sc0; args_dirty_all(); g_pso_dirty = pso_dirty; g_dss_dirty = dss_dirty; prog_resolve();
@@ -14131,13 +14221,13 @@ void ms_after(void) {
         if (v != t) defer_obj_unref(v);
     }
 }
-// Same-pass feedback sampling: a texture view this draw's fragment stage samples is exactly the level and layer of a color attachment of the current render pass, and the pass writes that attachment
+// Same-pass feedback sampling: a texture view this draw's fragment stage samples includes the level and layer of a color attachment of the current render pass, and the pass writes that attachment
 // (agl's post-effect program in Super Mario 3D World + Bowser's Fury, Captain Toad and Super Mario Odyssey writes the tone-mapped RGB10A2 image as an attachment while sampling it). On the Switch the read
 // returns the content from before this draw; on Metal, writing and sampling the same attachment within one render pass is undefined: the M4 Pro happens to read correctly, while the A20 Pro and the Apple M6
 // now and then read whole 16x16 blocks as (1,0,1), (0,0,0) or (0,1,0) (blocks of the compressed attachment caught while another tile stores them).
 // The fix: before such a draw opens its render pass, end the current render pass (the attachment lands in memory), copy that level and layer into a snapshot texture in the replay stream, make this draw
-// sample the snapshot; later draws reopen the render pass as usual (loading the attachment). Only single-level, single-layer 2D views that are exactly the attachment's level and layer are handled; views
-// over several levels or layers (mip-chain passes) are left as they are, other shapes are reported once.
+// sample the snapshot; later draws reopen the render pass as usual (loading the attachment). A view over several levels or layers (mip-chain and layer passes) gets what the levels its sampler
+// reads need (fb_prepare): a view without the attachment's level, or a snapshot of the whole view; other shapes are reported once.
 // Which draws: those that write the sampled attachment (channel mask and fragment output) or follow a draw of the same Metal pass that wrote it; a draw that samples an attachment nothing in its pass has
 // written reads it directly, and a later draw of that pass that writes it starts a new pass (on a tiled GPU the earlier reads in other tiles could see these writes). Which snapshot: NVN makes rendering
 // visible to texture reads only through nvnCommandBufferBarrier, so a snapshot taken since the game's last barrier (and in this submission) holds everything the game may expect to read; later such
@@ -14149,7 +14239,7 @@ void ms_after(void) {
 static int g_fb_mode = -1;   // 0 none, 1 writers with reuse until a barrier, 2 every sampling draw, fresh
 static uint64_t g_fb_bar, g_fb_reuse, g_fb_split;   // game barriers so far (OP_BARRIER with bits); draws that reused a snapshot; passes ended before a write to an attachment an earlier draw read
 static uint64_t g_fb_pass = UINT64_MAX; static uint32_t g_fb_wmask, g_fb_rmask, g_fb_dread, g_fb_dwrote;   // the current Metal render pass: color attachments written so far, sampled directly; a draw has read its depth attachment (or could have: bindless); a draw has written depth or stencil
-typedef struct { uint64_t ser, bar, sub, use, draw; int lv, sl; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use); draw: the draw it was last handed to (g_draw_seq)
+typedef struct { uint64_t ser, bar, sub, use, draw; int lv, sl; uint32_t lvm; __strong id<MTLTexture> snap; } fb_cache_t;   // use: when it was last taken or reused (g_fbc_use); draw: the draw it was last handed to (g_draw_seq); lvm: the levels copied into it (fb_prepare's range snapshots)
 static fb_cache_t g_fbc[8]; static uint64_t g_fbc_use;
 static int fb_mode(void) {
     if (g_fb_mode < 0) { const char *e = getenv("DM_NVN_FB_SNAP"); g_fb_mode = e && !strcmp(e, "0") ? 0 : e && !strcmp(e, "all") ? 2 : 1;
@@ -14157,7 +14247,11 @@ static int fb_mode(void) {
     return g_fb_mode;
 }
 static inline void fb_pass_sync(void) { uint64_t p = g_stat_pass + !g_enc; if (p != g_fb_pass) { g_fb_pass = p; g_fb_wmask = g_fb_rmask = g_fb_dread = g_fb_dwrote = 0; g_fb_dread_pool = 0; } }
-static inline int fb_shape(const fb_cache_t *e, MTLPixelFormat pf, NSUInteger w, NSUInteger h) { return e->snap && e->snap.pixelFormat == pf && e->snap.width == w && e->snap.height == h; }
+// A snapshot's shape: a single-level 2D texture for a view of the attachment's level alone, else the sampled view's type, size of its base level, layers and levels (fb_prepare)
+typedef struct { MTLPixelFormat pf; MTLTextureType type; NSUInteger w, h, arr, nl; } fb_shape_t;
+static inline int fb_shape(const fb_cache_t *e, const fb_shape_t *k) {
+    return e->snap && e->snap.pixelFormat == k->pf && e->snap.textureType == k->type && e->snap.width == k->w && e->snap.height == k->h && e->snap.arrayLength == k->arr && e->snap.mipmapLevelCount == k->nl;
+}
 static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb_bar && e->sub == g_sub_serial; }   // a later draw may still reuse it
 // The snapshot of an attachment's level and layer: the cached one (valid: *fresh = 0) or a texture to copy into (*fresh = 1; the entry is then valid from this barrier and submission on).
 // A new key takes an entry whose texture already has its format and size, one no later draw can reuse first, else the least recently used. Taking the entries in turn made a texture for
@@ -14168,24 +14262,31 @@ static inline int fb_live(const fb_cache_t *e) { return e->ser && e->bar == g_fb
 // An entry handed to the current draw is never taken for another key of that draw: its snapshot is bound already, and a copy into it would replace what the earlier binding reads. With
 // every entry live, a draw sampling two attachments of one format and size found the first one's entry the only one of that shape and copied the second over it (PR #813). A draw binds
 // at most four snapshots (g_fb_n), so four entries are left unless snapshot views fail to be made (the red line below)
-static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int *fresh) {
+static fb_cache_t *fb_snap_shape(uint64_t ser, int lv, int sl, const fb_shape_t *k, int force, int *fresh) {
     fb_cache_t *e = NULL;
     for (int i = 0; i < 8 && !e; i++) if (g_fbc[i].snap && g_fbc[i].ser == ser && g_fbc[i].lv == lv && g_fbc[i].sl == sl) e = &g_fbc[i];
-    if (e && !fb_shape(e, pf, w, h)) { e->ser = 0; e = NULL; }   // the attachment was made again in another format or size: its snapshot is no longer this key's
+    if (e && !fb_shape(e, k)) { e->ser = 0; e = NULL; }   // the attachment was made again in another format or size, or the view's shape changed: its snapshot is no longer this key's
     if (e && !force && fb_live(e)) { e->use = ++g_fbc_use; e->draw = g_draw_seq; *fresh = 0; return e; }
     if (!e) {   // by rank: same shape and not live, not live, same shape (every entry live), least recently used within a rank; none this draw holds
         int best = 1 << 30;
         for (int i = 0; i < 8; i++) { fb_cache_t *c = &g_fbc[i]; if (c->draw && c->draw == g_draw_seq) continue;
-            int r = fb_live(c) ? (fb_shape(c, pf, w, h) ? 2 : 3) : fb_shape(c, pf, w, h) ? 0 : 1;
+            int r = fb_live(c) ? (fb_shape(c, k) ? 2 : 3) : fb_shape(c, k) ? 0 : 1;
             if (r < best || (r == best && c->use < e->use)) { best = r; e = c; } }
         if (!e) { RED_ONCE(170, "same-pass feedback sampling: every snapshot entry is held by this draw; the attachment is read as it is"); return NULL; }
-        if (e->snap && !fb_shape(e, pf, w, h)) { defer_obj_release(e->snap); e->snap = nil; }
+        if (e->snap && !fb_shape(e, k)) { defer_obj_release(e->snap); e->snap = nil; }
     }
-    if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:NO];
+    if (!e->snap) { MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+        d.textureType = k->type; d.pixelFormat = k->pf; d.width = k->w; d.height = k->h; d.arrayLength = k->arr; d.mipmapLevelCount = k->nl;
         d.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView; d.storageMode = MTLStorageModePrivate;
         e->snap = rh_place(d); if (!e->snap) e->snap = [g_dev newTextureWithDescriptor:d];   // recycled memory: a resized attachment's snapshot takes the heap of an earlier size's
         if (!e->snap) { e->ser = 0; return NULL; } res_add(e->snap); }   // full queue barriers separate a copy from the draws that read the earlier content
-    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; e->draw = g_draw_seq; *fresh = 1; return e;
+    e->ser = ser; e->lv = lv; e->sl = sl; e->bar = g_fb_bar; e->sub = g_sub_serial; e->use = ++g_fbc_use; e->draw = g_draw_seq; e->lvm = 0; *fresh = 1; return e;
+}
+// The attachment's level and layer alone, which the caller copies when it is fresh
+static fb_cache_t *fb_snap(uint64_t ser, int lv, int sl, MTLPixelFormat pf, NSUInteger w, NSUInteger h, int force, int *fresh) {
+    fb_shape_t k = {pf, MTLTextureType2D, w, h, 1, 1}; fb_cache_t *e = fb_snap_shape(ser, lv, sl, &k, force, fresh);
+    if (e && *fresh) e->lvm = 1;
+    return e;
 }
 // ---- Same-pass feedback read from the tile ----
 // A draw whose every sample of an attachment of its open pass is a projective sample at its vertex shader's clip → screen varying (scr_proof), or a sample at its pixel position times
@@ -14298,14 +14399,21 @@ static int fb_tile_plan(NvProg *pr, uint32_t wm, uint64_t tile[4]) {
     if (!g_enc) g_fb_early_seq = g_draw_seq;
     return 1;
 }
-// The one level a draw's sampler lets it read through texture slot reg (combined handle's sampler sid), counted from the view's base, or -1. Only a combined handle's sampler (the shader's
-// SAMPT binding of the same slot) is known here: with a mip filter, a minimum and a maximum LOD that are the same whole number pin every fetch to that level, whatever LOD the shader asks for
-static int fb_pinned_level(const NvShader *fs, unsigned reg, int sid) {
+// The levels a draw's sampler lets it fetch through texture slot reg (combined handle's sampler sid), counted from the view's base and capped at its last level n - 1: *lo to *hs carry
+// weight, *hi also a level a linear mip filter fetches at weight 0 (the one above an integer LOD). 0 when unknown: only a combined handle's sampler (the shader's SAMPT binding of the
+// same slot) is known here. The sampler's minimum and maximum LOD clamp whatever LOD the shader asks for (an explicit one too); without a mip filter it reads the base level. A texel
+// fetch names its level without the sampler: the slot's reads are taken as samples
+static int fb_reach(const NvShader *fs, unsigned reg, int sid, int n, int *lo, int *hs, int *hi) {
     int combined = 0; for (int j = 0; j < fs->rf.nb && !combined; j++) combined = fs->rf.b[j].kind == NVN_RB_SAMPT && fs->rf.b[j].reg == reg;
-    if (!combined || sid <= 0) return -1;
+    if (!combined || sid <= 0 || n < 1) return 0;
     os_unfair_lock_lock(&g_rmu); int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0}; os_unfair_lock_unlock(&g_rmu);
-    if (!ok || sp.minf < 2 || sp.lod_min != sp.lod_max || sp.lod_min < 0 || sp.lod_min > 15 || sp.lod_min != floorf(sp.lod_min)) return -1;   // minf 0, 1: no mip filter, the base level
-    return (int)sp.lod_min;
+    if (!ok) return 0;
+    if (sp.minf < 2) { *lo = *hs = *hi = 0; return 1; }   // minf 0, 1: no mip filter
+    float a = fminf(fmaxf(sp.lod_min, 0), 16), b = fminf(fmaxf(sp.lod_max, 0), 16);
+    if (!(a <= b)) return 0;   // an inverted (or NaN) clamp: what the GPU reads is not defined here
+    int l = (int)floorf(a), s = (int)ceilf(b), h = sp.minf >= 4 ? (int)floorf(b) + 1 : s;   // minf 4, 5: linear mip filter
+    *lo = MIN(l, n - 1); *hs = MIN(s, n - 1); *hi = MIN(MAX(h, s), n - 1);
+    return 1;
 }
 void mtl_fb_stats(uint64_t *snaps, uint64_t *reused, uint64_t *tile, uint64_t *wait) { *snaps = g_fb_count; *reused = g_fb_reuse; *tile = g_fb_tile_draws; *wait = g_fb_tile_wait; }   // the power line's feedback counts (hle_nvn.c)
 // Whether the fragment shader's handles in uniform buffers (TEXU) name a texture of this serial: read as encode_args reads them for the draw. Fire Emblem Fortune's Weave's
@@ -14441,54 +14549,73 @@ static void fb_prepare(NvProg *pr) {
             if (tl + t.mipmapLevelCount <= (NSUInteger)lv || tl > (NSUInteger)lv) continue;   // the sampled levels do not include the attachment's level (mip generation etc.): not feedback
             NSUInteger tn = t.textureType == MTLTextureType2DArray || t.textureType == MTLTextureTypeCubeArray || t.textureType == MTLTextureType2DMultisampleArray ? t.arrayLength * (t.textureType == MTLTextureTypeCubeArray ? 6 : 1) : t.textureType == MTLTextureTypeCube ? 6 : 1;
             if (ts + tn <= (NSUInteger)sl || ts > (NSUInteger)sl) continue;   // nor its layer: not feedback
+            // What the draw is given depends on the levels it reads (fb_reach), a: the attachment's level in the view. The attachment's level read through a texture holds no defined data
+            // on Apple's GPUs while its pass renders it, and a linear mip filter fetches the level above an integer LOD even at weight 0: Donkey Kong Bananza's environment cube (128x128,
+            // 8 levels, R11G11B10F, levels 1..7 each drawn from the one above with an explicit level) got NaN texels from sampling its full view; its reflections spread them over the scene
+            // through the cube's prefilter, and bloom turned them into white blotches.
+            // - One level other than the attachment's (a pinned sampler): a view of that level alone, whichever side it lies on. Donkey Kong Bananza's bloom chains (576x324 R11G11B10F,
+            //   5 levels) upsample with ad1a5991aaad135e, its sampler's LOD clamp n + 1..n + 1; the view of the levels below clamped that read to n - 1: the stage intro's neon letters
+            //   came out fat and filled. Several levels, all above the attachment's: the view as it is.
+            // - Levels from below the attachment's, or no sampler known (a mip-chain pass that picks the level below with an explicit LOD through a sampler that clamps nothing: the cube
+            //   above, agl's mip chain de4e1bfab0572149 in Ocarina of Time): a view of the levels below, with the same base and so the same level numbers. No copy. Exact when the clamp
+            //   ends below the attachment's level; a shader that picks a level at or above it with its own LOD reads the view's last level instead (no game is known to do it).
+            // - Otherwise the clamp starts at the attachment's level (a pinned read of the level the pass renders, a range or a fractional LOD from there up), or the pass renders the
+            //   view's base level with no sampler known: a snapshot of the whole view, its type, sizes, layers and levels, so the shader's LODs and the sampler's clamp keep their meaning,
+            //   with the levels the sampler can reach copied (every level when it is not known). A view of the attachment's level and layer alone is the single-level 2D snapshot this
+            //   rule began with
+            int n = (int)t.mipmapLevelCount, a = lv - (int)tl, lo = 0, hs = n - 1, hi = n - 1;
+            int known = !image && !texu && fb_reach(fs, b->reg, (int)(handle >> 20), n, &lo, &hs, &hi);
             if (g_fb_mode == 1 && !((wm | g_fb_wmask) >> k & 1)) { g_fb_rmask |= 1u << k; continue; }   // nothing in this pass has written it so far: read directly
-            // Mip-chain passes (render level n while the view covers the chain, sampling a lower level): the draw samples a view of the levels below n instead, with the same base and
-            // so the same level numbers. Sampling the full view read the attachment's level too: a linear mip filter fetches the next level even at weight 0, and on Apple's GPUs an
-            // attached level read through a texture holds no defined data. Donkey Kong Bananza's environment cube (128x128, 8 levels, R11G11B10F, levels 1..7 each drawn from the one
-            // above with an explicit level) got NaN texels that way; its reflections spread them over the scene through the cube's prefilter, and bloom turned them into white blotches
-            // That view holds only the levels below the attachment's. An upsample pass reads the level above instead (level n drawn from n + 1), which the view clamped to n - 1, a sharper
-            // level the chain then added back up; rendering the view's base level, it read the attachment's own. When the sampler pins one level (fb_pinned_level) the draw samples a view
-            // of that level alone, whichever side of the attachment it lies on. Donkey Kong Bananza's bloom chains (576x324 R11G11B10F, 5 levels) upsample with ad1a5991aaad135e, its
-            // sampler's LOD clamp n + 1..n + 1: the stage intro's neon letters came out fat and filled
-            int pin = !image && !texu && t.mipmapLevelCount != 1 ? fb_pinned_level(fs, b->reg, (int)(handle >> 20)) : -1;
-            if (pin >= 0 && (NSUInteger)pin >= t.mipmapLevelCount) pin = (int)t.mipmapLevelCount - 1;   // past the view's levels: its last one, where the sampler's clamp ends
-            if (pin >= 0 && tl + (NSUInteger)pin != (NSUInteger)lv) {
-                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl + (NSUInteger)pin, 1) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
-                if (!use) { RED_ONCE(143, "same-pass feedback sampling: cannot make the view of level %lu that the sampler pins (format %lu); left as is", (unsigned long)(tl + (NSUInteger)pin), (unsigned long)t.pixelFormat); continue; }
+            if (n != 1 && known && lo == hs && lo != a) {
+                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl + (NSUInteger)lo, 1) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
+                if (!use) { RED_ONCE(143, "same-pass feedback sampling: cannot make the view of level %lu that the sampler pins (format %lu); left as is", (unsigned long)(tl + (NSUInteger)lo), (unsigned long)t.pixelFormat); continue; }
                 if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
                 g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
-                static int once; if (!once++) MLOG("same-pass feedback sampling: shader %s renders level %d of a view of levels %lu+%lu; its sampler pins level %lu, which it samples alone", fs->key, lv, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)(tl + (NSUInteger)pin));
+                static int once; if (!once++) MLOG("same-pass feedback sampling: shader %s renders level %d of a view of levels %lu+%lu; its sampler pins level %lu, which it samples alone", fs->key, lv, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)(tl + (NSUInteger)lo));
                 continue;
             }
-            if (t.mipmapLevelCount != 1 && (NSUInteger)lv > tl) {
-                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl, (NSUInteger)lv - tl) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
-                if (!use) { RED_ONCE(82, "same-pass feedback sampling: cannot make the view of levels %lu+%d below the attachment (format %lu); left as is", (unsigned long)tl, lv - (int)tl, (unsigned long)t.pixelFormat); continue; }
+            if (known && lo > a) continue;   // a range of levels above the attachment's: the view as it is
+            if (a > 0 && (!known || lo < a)) {
+                id<MTLTexture> use = [base newTextureViewWithPixelFormat:t.pixelFormat textureType:t.textureType levels:NSMakeRange(tl, (NSUInteger)a) slices:NSMakeRange(ts, tn) swizzle:t.swizzle];
+                if (!use) { RED_ONCE(82, "same-pass feedback sampling: cannot make the view of levels %lu+%d below the attachment (format %lu); left as is", (unsigned long)tl, a, (unsigned long)t.pixelFormat); continue; }
                 if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
                 g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
                 static int once; if (!once++) MLOG("same-pass feedback sampling: shader %s renders level %d of a view of levels %lu+%lu; it samples a view of the levels below (mip-chain pass)", fs->key, lv, (unsigned long)tl, (unsigned long)t.mipmapLevelCount);
                 continue;
             }
-            if (t.mipmapLevelCount != 1 || tn != 1) {   // layer passes, and mip-chain passes rendering the view's base level: not snapshotted
-                static int once; if (!once++) MLOG("same-pass feedback sampling: shader %s renders level %d layer %d while its view covers levels %lu+%lu, layers %lu+%lu; left as is (mip-chain or layer pass)", fs->key, lv, sl, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, (unsigned long)tn);
+            // The snapshot has the view's type; the draw samples a view of it in the type the shader declares (the host holds cube maps as 2D arrays: encode_args would fit one)
+            int single = n == 1 && tn == 1, ty = (int)t.textureType, vt = b->dtt;
+            int fits = vt == ty || (ty == MTLTextureType2DArray && ((vt == MTLTextureTypeCube && tn == 6) || (vt == MTLTextureTypeCubeArray && tn % 6 == 0)))
+                || ((ty == MTLTextureTypeCube || ty == MTLTextureTypeCubeArray) && vt == MTLTextureType2DArray);
+            if (t.sampleCount != 1 || base.parentTexture || !fits || (single ? ty != MTLTextureType2D :
+                    ty != MTLTextureType2D && ty != MTLTextureType2DArray && ty != MTLTextureTypeCube && ty != MTLTextureTypeCubeArray)) {
+                RED_ONCE(80, "same-pass feedback sampling: a sampled view the snapshot cannot stand in for (type %lu as %u, levels %lu+%d, layers %lu+%lu, attachment level %d layer %d, shader %s); left as is",
+                         (unsigned long)t.textureType, (unsigned)b->dtt, (unsigned long)tl, n, (unsigned long)ts, (unsigned long)tn, lv, sl, fs->key);
                 continue; }
-            if (t.textureType != MTLTextureType2D || t.sampleCount != 1 || ts != (NSUInteger)sl || b->dtt != MTLTextureType2D || base.parentTexture) {
-                RED_ONCE(80, "same-pass feedback sampling: the sampled view is not a single-level 2D view of the attachment's level and layer (type %lu levels %lu+%lu layer %lu, attachment level %d layer %d, shader %s); left as is", (unsigned long)t.textureType, (unsigned long)tl, (unsigned long)t.mipmapLevelCount, (unsigned long)ts, lv, sl, fs->key);
-                continue; }
-            NSUInteger w = MAX(base.width >> lv, 1ul), h = MAX(base.height >> lv, 1ul); int fresh;
-            fb_cache_t *e = fb_snap(ser, lv, sl, base.pixelFormat, w, h, g_fb_mode == 2, &fresh); if (!e) continue;
+            if (!known) lo = 0, hi = n - 1;   // every level the shader may name
+            uint32_t need = (uint32_t)(((2ull << hi) - 1) & ~((1ull << lo) - 1));
+            fb_shape_t shp = {base.pixelFormat, t.textureType, MAX(base.width >> tl, 1ul), MAX(base.height >> tl, 1ul), single ? 1 : t.arrayLength, (NSUInteger)n};
+            NSUInteger w = shp.w, h = shp.h; int fresh;
+            fb_cache_t *e = fb_snap_shape(ser, (int)tl, (int)ts, &shp, g_fb_mode == 2, &fresh); if (!e) continue;
             id<MTLTexture> snap = e->snap;
-            if (fresh) {
+            uint32_t miss = need & ~e->lvm;   // a snapshot taken since the last barrier lacks levels an earlier draw did not reach: copy those too
+            if (miss) {
                 rp_flush();   // ends the pass, or lands a clear still waiting to be its load action: the snapshot holds the cleared content (fb_snap)
-                id<MTL4ComputeCommandEncoder> be = blit(); enc_b_copy_texture(be, base, (NSUInteger)sl, (NSUInteger)lv, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), snap, 0, 0, MTLOriginMake(0, 0, 0));
+                id<MTL4ComputeCommandEncoder> be = blit();
+                for (int m = 0; m < n; m++) if (miss >> m & 1) for (NSUInteger q = 0; q < tn; q++)
+                    enc_b_copy_texture(be, base, ts + q, tl + (NSUInteger)m, MTLOriginMake(0, 0, 0), MTLSizeMake(MAX(w >> m, 1ul), MAX(h >> m, 1ul), 1), snap, q, (NSUInteger)m, MTLOriginMake(0, 0, 0));
+                e->lvm |= miss;
             } else if (g_enc && (g_fb_rmask >> k & 1)) rp_end();   // an earlier draw of this pass read the attachment directly: it must not see this pass's writes
             if (!g_enc) fb_pass_sync();
             MTLTextureSwizzleChannels sw = t.swizzle;
-            int same = t.pixelFormat == snap.pixelFormat && sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
-            id<MTLTexture> use = same ? snap : [snap newTextureViewWithPixelFormat:t.pixelFormat textureType:MTLTextureType2D levels:NSMakeRange(0, 1) slices:NSMakeRange(0, 1) swizzle:sw];
+            int same = t.pixelFormat == snap.pixelFormat && (int)snap.textureType == vt && sw.red == MTLTextureSwizzleRed && sw.green == MTLTextureSwizzleGreen && sw.blue == MTLTextureSwizzleBlue && sw.alpha == MTLTextureSwizzleAlpha;
+            id<MTLTexture> use = same ? snap : [snap newTextureViewWithPixelFormat:t.pixelFormat textureType:(MTLTextureType)vt levels:NSMakeRange(0, (NSUInteger)n) slices:NSMakeRange(0, tn) swizzle:sw];
             if (!use) { RED_ONCE(81, "same-pass feedback sampling: cannot create the snapshot view (format %lu); left as is", (unsigned long)t.pixelFormat); continue; }
             if (g_fb_use[g_fb_n] && g_fb_use[g_fb_n] != use) defer_obj_unref(g_fb_use[g_fb_n]);
             g_fb_src[g_fb_n] = t; g_fb_use[g_fb_n] = use; g_fb_rid[g_fb_n] = use.gpuResourceID._impl; g_fb_n++;
-            if (!fresh) { g_fb_reuse++; PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d: this draw samples the snapshot taken since the last barrier", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl); continue; }
+            if (!miss) { g_fb_reuse++; PD("N %llu same-pass feedback sampling: attachment %d ser=%llu level %d layer %d: this draw samples the snapshot taken since the last barrier", g_stat_pass + !g_enc, k, (unsigned long long)ser, lv, sl); continue; }
+            if (!single) { static int once; if (!once++) MLOG("same-pass feedback sampling: shader %s renders level %d layer %d of a view of levels %lu+%d, layers %lu+%lu; it samples a snapshot of the view (levels %d..%d copied)",
+                                                            fs->key, lv, sl, (unsigned long)tl, n, (unsigned long)ts, (unsigned long)tn, lo, hi); }
             g_fb_count++;
             if (g_fb_count == 1 || g_fb_count == 10 || g_fb_count == 1000 || g_fb_count % 100000 == 0)
                 MLOG("same-pass feedback sampling: snapshot #%llu, %llu draws reused one, %llu read the tile (%llu waited for their pipeline), %llu passes ended before a write to an attachment read directly (frame %llu pass %llu, shader %s %s %d samples attachment %d ser=%llu %lux%lu format %lu)", (unsigned long long)g_fb_count, (unsigned long long)g_fb_reuse, (unsigned long long)g_fb_tile_draws, (unsigned long long)g_fb_tile_wait, (unsigned long long)g_fb_split,
@@ -14695,11 +14822,7 @@ static id<MTLSharedEvent> g_mdi_ev; static uint64_t g_mdi_v, g_mdi_waits, g_mdi_
 static void mdi_wait(void) {
     if (g_tf_enc) tf_pass_end();
     rp_end(); ubd_land();
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    up_flush(); res_commit();
-    if (g_tf_enc) tf_pass_end();
-    [g_cb endCommandBuffer];
-    rec_commit(g_cb, nil); g_cbgen++;
+    cb_commit(nil, 0);
     if (!g_mdi_ev) g_mdi_ev = [g_dev newSharedEvent];
     rec_signal(g_mdi_ev, ++g_mdi_v); rec_drain();
     uint64_t w0 = ws_t0(); int ok = [g_mdi_ev waitUntilSignaledValue:g_mdi_v timeoutMS:10000]; if (ws_on()) ws_put(WS_MDI, w0, 1);
@@ -16529,13 +16652,12 @@ static void sub_cut(void) {
     if (ts_on()) ts_boundary();
     if (g_cut_copy) g_copy_cuts++;
     g_cut_copy = 0;
-    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
-    up_flush();
+    cb_seal();   // before the segment's state list is taken
     uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
     uint32_t k = g_seg++; seg_clk *sc = NULL;   // reports encoded so far keep this segment's GPU times (seg_ts)
-    if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before)
+    if (seg_ts()) { if (!g_sclk) { g_sclk = calloc(1, sizeof *g_sclk); if (!g_sclk) MDIE("segment clock allocation failed"); atomic_store(&g_sclk->refs, 1); } sc = g_sclk; atomic_fetch_add(&sc->refs, 1); if (k < SEG_CLK_N) sc->cm[sc->ncm++] = (uint16_t)k; }   // this command buffer ends with segment k (seg_idle_before, sub_place)
     cbs_list *cbs = cbs_take(); uint64_t cbs_fence = g_fence + 1; cbs_fly_put(cbs_fence, cbs);
-    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    DmCommitFB *o = [DmCommitFB new];
     atomic_fetch_add(&g_seg_inflight, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         atomic_fetch_sub(&g_seg_inflight, 1);
@@ -16545,11 +16667,7 @@ static void sub_cut(void) {
         char where[64]; snprintf(where, sizeof where, "fence %llu, segment %u", (unsigned long long)cbs_fence, k); cbs_feedback(cbs, cb.error, where);
         gpu_lost_check(cb.error, "segment");
     }];
-    gmem_commit_patch();
-    res_commit();
-    if (g_tf_enc) tf_pass_end();
-    [g_cb endCommandBuffer];
-    rec_commit(g_cb, o); g_cbgen++;
+    cb_commit(o, 0);
     if (rec_on()) rec_publish();   // the segment reaches the encode thread now, not when its block of records fills
     g_cb = rec_cb_new();
     [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];   // one allocator encodes several command buffers in sequence; it is reset only once its fence (the last segment) has passed, when a later submission starts
@@ -17914,7 +18032,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
 // Swapchain texture return: before AcquireTexture gets a texture it waits for the ticket of that texture's previous present to be processed (mtl_present_wait), after which the commands the game draws into it
 // are necessarily ordered after that blit on the GPU queue.
 #define PQ 8
-typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
+typedef struct { tex_t t; double period; uint64_t frame; int crop[4]; double t_in; uint64_t ev_val, snap_v, sub_v; } pq_item;   // snap_v: the snapshot copy this present shows (snap_commit_wait); sub_v: the submissions a present of the game's own texture follows (sub_commit_wait)   // t_in: the time the game handed this frame into the present queue (CACurrentMediaTime); ev_val: see g_ext_ev
 // External producer (the Vulkan layer, dm/gfx/vk) renders on its own queue and signals this event when a frame's rendering is done: the present of that frame waits for the value on g_q4
 static id<MTLSharedEvent> g_ext_ev;
 static void ext_wait(uint64_t v) { if (v && g_ext_ev) [g_q4 waitForEvent:g_ext_ev value:v]; }
@@ -18006,7 +18124,7 @@ static void link_drain_note(double cb, double age, int dropped) {
     pthread_mutex_unlock(&g_pq_mu);
     link_drain_note(cb, cb - it.t_in, ticket > first);
     int submitted;
-    ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+    ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); mtl_tex_unpin(it.t.serial); }
     g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
@@ -18150,7 +18268,7 @@ static void *present_main(void *arg) {
         uint64_t ticket = ++g_pq_read; g_classic_busy = 1;
         pthread_mutex_unlock(&g_pq_mu);
         int submitted;
-        ext_wait(it.ev_val); snap_commit_wait(it.snap_v);
+        ext_wait(it.ev_val); snap_commit_wait(it.snap_v); sub_commit_wait(it.sub_v);
         @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, nil, 0); mtl_tex_unpin(it.t.serial); }
         pthread_mutex_lock(&g_pq_mu); g_classic_busy = 0; pthread_cond_broadcast(&g_pq_cv); pthread_mutex_unlock(&g_pq_mu);
         if (!submitted) {
@@ -18268,6 +18386,7 @@ static uint64_t snap_take(const tex_t *t) {
     res_commit();
     if (!g_snap_ev) {
         g_snap_ev = [g_dev newSharedEvent];
+        if (!g_snap_ev) MDIE("present snapshots: no shared event");
         MTLResidencySetDescriptor *rd = [MTLResidencySetDescriptor new]; rd.initialCapacity = SNAP_MAX; NSError *e = nil;
         g_snap_res = [g_dev newResidencySetWithDescriptor:rd error:&e]; if (!g_snap_res) MDIE("present snapshots: no residency set: %s", e.localizedDescription.UTF8String);
         [g_q4 addResidencySet:g_snap_res];
@@ -18341,7 +18460,7 @@ static uint64_t present_enqueue(const tex_t *t, double period, const int crop[4]
     if (t->serial < EXT_SERIAL) mtl_tex_pin(t->serial);   // an external texture is the present path's until mtl_ext_tex_release, which waits for its presents (the unpins find no pin)
     pthread_mutex_lock(&g_pq_mu);
     while (g_pq_in - g_pq_done >= PQ) pthread_cond_wait(&g_pq_cv, &g_pq_mu);   // Wait only when the queue is full; normally AcquireTexture blocks first
-    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0};
+    pq_item *it = &g_pq[g_pq_in % PQ]; *it = (pq_item){*t, period, atomic_load(&g_cur_frame), {0}, CACurrentMediaTime(), ev_val, ss ? g_snap[slot].ev : 0, !ss && !ev_val && on_sub_thread() ? g_fence : 0};
     if (crop) memcpy(it->crop, crop, sizeof it->crop);   // The current frame's state is enqueued with the ticket number, rather than reading the mutable window late on the present thread
     uint64_t tk = ++g_pq_in;
     g_pres_tin[tk % PRING] = it->t_in;
