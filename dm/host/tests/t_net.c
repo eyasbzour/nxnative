@@ -355,9 +355,33 @@ static void udp_unheard(void) {
     CHECK(got > 0 && strstr(text, want), "a UDP socket that sent for 2 s and heard nothing is logged once, with its count");
     close(native); CLOSE(guest);
 }
+// The UDP watch per peer: of two peers that answered, the one that stops while the socket still sends to it is logged by its number, with the other
+// still heard (hle_net_backend.c net_udp_peer_lines)
+static void udp_peer_quiet(void) {
+    int guest = SOCKET(2, 2, 17); address local = addr(htonl(0x7f000001), 0), first = local, second = local, mine = {0}; unsigned n = sizeof mine;
+    CHECK(guest >= 0 && BIND(guest, &local, sizeof local) == 0 && NAME(guest, &mine, &n) == 0, "UDP peer watch socket binds");
+    int a = native_udp(&first), b = native_udp(&second);
+    struct sockaddr_in to = {.sin_len = sizeof to, .sin_family = AF_INET, .sin_addr.s_addr = mine.ip, .sin_port = mine.port};
+    char path[] = "/tmp/t_net_peers_XXXXXX"; int log = mkstemp(path), saved = dup(2); uint8_t byte[8];
+    fflush(stderr); dup2(log, 2);
+    SEND(guest, "a", 1, 0, &first, 16); SEND(guest, "b", 1, 0, &second, 16);   // peer #1, peer #2
+    sendto(a, "1", 1, 0, (struct sockaddr *)&to, sizeof to); sendto(b, "2", 1, 0, (struct sockaddr *)&to, sizeof to);
+    struct timespec step = {0, 200000000};
+    for (int i = 0; i < 12; i++) {   // 2.4 s: both still sent to, only the second answers
+        nanosleep(&step, NULL);
+        if (i) sendto(b, "2", 1, 0, (struct sockaddr *)&to, sizeof to);
+        while (RECV(guest, byte, sizeof byte, 0x80, NULL, NULL) > 0) {}
+        SEND(guest, "a", 1, 0, &first, 16); SEND(guest, "b", 1, 0, &second, 16);
+    }
+    fflush(stderr); dup2(saved, 2); close(saved);
+    char text[4096] = {0}; lseek(log, 0, SEEK_SET); ssize_t got = read(log, text, sizeof text - 1); close(log); unlink(path);
+    char want[160]; snprintf(want, sizeof want, "[RED] net: UDP socket %d: peer #1 sent nothing for 2 s while still sent to; 1 other peer still heard", guest);
+    CHECK(got > 0 && strstr(text, want) && !strstr(text, "peer #2 sent nothing"), "the peer that stopped is logged by its number, with the other still heard");
+    close(a); close(b); CLOSE(guest);
+}
 int main(int argc, char **argv) {
     struct sigaction sa = {.sa_handler = sigpipe}; sigemptyset(&sa.sa_mask); sigaction(SIGPIPE, &sa, NULL);
-    offline(); nifm(); udp(); udp_unheard(); eventfd_net(); concurrency(); tcp(); errors_and_resolver(); discovery_peer();
+    offline(); nifm(); udp(); udp_unheard(); udp_peer_quiet(); eventfd_net(); concurrency(); tcp(); errors_and_resolver(); discovery_peer();
     if (argc == 2 && !strcmp(argv[1], "--no-broadcast")) puts("broadcast test skipped explicitly (requires local-network permission for this test executable)"); else broadcast();
     GET(fn_vvoid, "_ZN2nn6socket8FinalizeEv")();
     CHECK(atomic_load(&waits) > 0 && atomic_load(&wait_balance) == 0, "all host waits yield and restore guest execution");

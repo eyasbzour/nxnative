@@ -213,22 +213,65 @@ static void net_trace(const char *op, int fd, long result) {
 // so a log shows which side went quiet. One that has sent for NET_UDP_QUIET_MS and never received is logged once too, and again at its first datagram:
 // a Mario Kart 8 Deluxe match that never connected (2618-0519) sent and heard nothing, and the watch said nothing. A socket that only sends (a local
 // broadcast) logs that line once as well, so it is not [RED]. A send or receive error is logged the first time each errno appears. No addresses: the
-// peers are other players
-enum { NET_UDP_QUIET_MS = 2000 };
-typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms, first_out_ms; int quiet, unheard; } net_udp_watch;
+// peers are other players.
+// Each peer a socket sends to or hears from is watched too, numbered #1, #2... in the order the socket first met it. A peer it heard and still sends
+// to (a send in the last NET_UDP_SENDING_MS) that goes NET_UDP_QUIET_MS without a datagram is logged once, with how many of the socket's other
+// peers it still hears, and again when it is heard; a peer sent to for that long and never heard is logged once. In a Mario Kart 8 Deluxe room of three
+// the game showed 2618-0502 to one player while the other two kept racing, and the socket's own counts could not say which peer stopped. Peers past
+// NET_UDP_PEERS are not watched one by one
+enum { NET_UDP_QUIET_MS = 2000, NET_UDP_SENDING_MS = 1000, NET_UDP_PEERS = 16 };
+typedef struct { uint32_t ip; uint16_t port; uint8_t quiet, unheard; uint64_t in, out, last_in_ms, last_out_ms, first_out_ms, quiet_since_ms; } net_udp_peer;
+typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms, first_out_ms; int quiet, unheard, npeers; net_udp_peer *peers; } net_udp_watch;
 static net_udp_watch g_udp_watch[NET_MAX];
 static pthread_mutex_t g_udp_watch_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_udp_errors_told[2];   // bit n: errno n already logged (receive, send)
 static net_udp_watch *net_udp_entry(const net_ref *r) {   // with g_udp_watch_lock held; a reused slot starts again
     net_udp_watch *w = &g_udp_watch[r->guest];
-    if (w->generation != r->generation) { memset(w, 0, sizeof *w); w->generation = r->generation; }
+    if (w->generation != r->generation) { free(w->peers); memset(w, 0, sizeof *w); w->generation = r->generation; }
     return w;
 }
-static void net_udp_note(const net_ref *r, int received, int sent) {
+// The peer's entry (with g_udp_watch_lock held), added on first sight; NULL without an address, or when the socket already watches NET_UDP_PEERS
+static net_udp_peer *net_udp_peer_entry(net_udp_watch *w, const struct sockaddr_in *a) {
+    if (!a || a->sin_family != AF_INET) return NULL;
+    for (int i = 0; i < w->npeers; i++) if (w->peers[i].ip == a->sin_addr.s_addr && w->peers[i].port == a->sin_port) return &w->peers[i];
+    if (w->npeers >= NET_UDP_PEERS) return NULL;
+    if (!w->peers && !(w->peers = calloc(NET_UDP_PEERS, sizeof *w->peers))) return NULL;
+    net_udp_peer *p = &w->peers[w->npeers++]; p->ip = a->sin_addr.s_addr; p->port = a->sin_port; return p;
+}
+// One line about the socket's peers, if one is due (with g_udp_watch_lock held)
+static void net_udp_peer_lines(const net_ref *r, net_udp_watch *w, net_udp_peer *from, uint64_t now, char *line, size_t size) {
+    if (from && from->quiet) {
+        snprintf(line, size, "net: UDP socket %d: peer #%d heard again after %.1f s without (in %llu, out %llu)", r->guest, (int)(from - w->peers) + 1,
+                 (now - from->quiet_since_ms) / 1000.0, (unsigned long long)from->in, (unsigned long long)from->out);
+        from->quiet = 0; return;
+    }
+    for (int i = 0; i < w->npeers; i++) {
+        net_udp_peer *p = &w->peers[i];
+        if (now - p->last_out_ms >= NET_UDP_SENDING_MS || !p->first_out_ms) continue;   // only a peer the socket still sends to
+        if (p->in && !p->quiet && now - p->last_in_ms >= NET_UDP_QUIET_MS) {
+            int heard = 0; for (int k = 0; k < w->npeers; k++) heard += k != i && w->peers[k].in && now - w->peers[k].last_in_ms < NET_UDP_QUIET_MS;
+            p->quiet = 1; p->quiet_since_ms = p->last_in_ms;
+            snprintf(line, size, "[RED] net: UDP socket %d: peer #%d sent nothing for %d s while still sent to; %d other peer%s still heard (in %llu, out %llu)",
+                     r->guest, i + 1, NET_UDP_QUIET_MS / 1000, heard, heard == 1 ? "" : "s", (unsigned long long)p->in, (unsigned long long)p->out);
+            return;
+        }
+        if (!p->in && !p->unheard && now - p->first_out_ms >= NET_UDP_QUIET_MS) {
+            p->unheard = 1;
+            snprintf(line, size, "net: UDP socket %d: peer #%d never answered, %d s after the first send (%llu sent)", r->guest, i + 1, NET_UDP_QUIET_MS / 1000,
+                     (unsigned long long)p->out);
+            return;
+        }
+    }
+}
+static void net_udp_note(const net_ref *r, int received, int sent, const struct sockaddr_in *peer) {
     if (r->type != 2 || r->guest < 0 || r->guest >= NET_MAX) return;
-    uint64_t now = net_ms(); char line[160]; line[0] = 0;
+    uint64_t now = net_ms(); char line[160], peer_line[200]; line[0] = peer_line[0] = 0;
     pthread_mutex_lock(&g_udp_watch_lock);
     net_udp_watch *w = net_udp_entry(r);
+    net_udp_peer *p = net_udp_peer_entry(w, peer);
+    if (p && received) { p->in++; p->last_in_ms = now; }
+    if (p && sent) { p->out++; p->last_out_ms = now; if (!p->first_out_ms) p->first_out_ms = now; }
+    net_udp_peer_lines(r, w, received ? p : NULL, now, peer_line, sizeof peer_line);
     if (sent && !w->first_out_ms) w->first_out_ms = now;
     w->in += (uint64_t)received; w->out += (uint64_t)sent;
     if (received) {
@@ -248,6 +291,7 @@ static void net_udp_note(const net_ref *r, int received, int sent) {
     }
     pthread_mutex_unlock(&g_udp_watch_lock);
     if (line[0]) fprintf(stderr, "%s\n", line);
+    if (peer_line[0]) fprintf(stderr, "%s\n", peer_line);
 }
 static void net_udp_error(const net_ref *r, int sending, int err) {
     if (r->type != 2 || err <= 0 || err >= 64) return;
@@ -542,9 +586,10 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
         // Kernel copyout cannot fault into the dirty-page signal hook. A wait or
         // partial stream read may allow the renderer to protect this span again.
         dm_guest_write_prepare(buf ? (char *)buf + total : NULL, len - total);
-        socklen_t n = sizeof a; ssize_t got = recvfrom(r.fd, buf ? (char *)buf + total : NULL, len - total, hostflags, addr ? (struct sockaddr *)&a : NULL, addr ? &n : NULL); int err = errno;
+        socklen_t n = sizeof a; a.sin_family = 0;   // the source is always asked for (the UDP watch's peer); the guest gets it only when it asked
+        ssize_t got = recvfrom(r.fd, buf ? (char *)buf + total : NULL, len - total, hostflags, (struct sockaddr *)&a, &n); int err = errno;
         if (got >= 0) {
-            total += (size_t)got; result = (long)total; net_udp_note(&r, 1, 0);
+            total += (size_t)got; result = (long)total; net_udp_note(&r, 1, 0, n >= sizeof a ? &a : NULL);
             if (addr) net_addr_out(addr, addrlen, &a);
             if (!got || r.type != 1 || !(flags & 0x40) || r.nonblock || (flags & 0x80) || total == len) break;
             continue;
@@ -552,7 +597,7 @@ long dm_net_recv(int guest, void *buf, unsigned long len, int flags, void *addr,
         // A host report of ICMP unreachable for an earlier send, delivered on the next receive of a UDP socket. In Nextendo mode it counts as
         // no datagram yet, so a peer that is not listening yet does not end a session (Mush8 does the same for Mario Kart 8 Deluxe)
         if (r.type == 2 && (err == ECONNREFUSED || err == ECONNRESET || err == ENETRESET) && dm_net_nextendo_enabled()) err = EAGAIN;
-        if (err == EAGAIN) net_udp_note(&r, 0, 0); else net_udp_error(&r, 0, err);
+        if (err == EAGAIN) net_udp_note(&r, 0, 0, NULL); else net_udp_error(&r, 0, err);
         if (err != EAGAIN || r.nonblock || (flags & 0x80)) { if (!total) result = net_error(net_errno(err)); break; }
         if (net_wait(&r, POLLIN, r.recv_ms, start)) { if (!total) result = -1; break; }
     }
@@ -563,7 +608,7 @@ static long net_send_one(net_ref *r, const void *buf, unsigned long len, int hos
     uint64_t start = net_ms(); long result; int reported = 0;
     for (;;) {
         result = a ? net_discovery_packet(r->fd,buf,len,hostflags,a) : sendto(r->fd,buf,len,hostflags,NULL,0); int err = errno;
-        if (result >= 0) { net_udp_note(r, 0, 1); break; }
+        if (result >= 0) { net_udp_note(r, 0, 1, a); break; }
         if (err != EAGAIN) net_udp_error(r, 1, err);
         // As on a receive (dm_net_recv): the host hands an earlier datagram's ICMP report to the next call on a UDP socket, a send too, and then
         // does not send this datagram (the report is cleared). In Nextendo mode it is sent again once
