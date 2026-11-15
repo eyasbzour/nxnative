@@ -379,7 +379,7 @@ int dm_net_socket(int family, int type, int protocol) {
     net_trace("socket", result, result); return result;
 }
 // In Nextendo mode a closed UDP port stays open for a moment. A peer-to-peer library that closes a bound UDP socket and binds the same port
-// again (Mush8 handles this for Mario Kart 8 Deluxe's Pia; not yet seen in a log here) would otherwise have datagrams that arrive in between
+// again (Mario Kart 8 Deluxe's Pia, as Mush8 found; a 2026-11-15 log here shows it binding a new UDP socket each time it goes back to matchmaking, the port not logged) would otherwise have datagrams that arrive in between
 // answered with ICMP port unreachable, where Horizon drops them. So closing a bound, unconnected UDP socket keeps its host socket for
 // NET_PARK_MS. A bind to that port within that time closes it first, so the game's new socket, with the options the game set on it, gets the
 // port; what arrived in between is dropped, as on Horizon.
