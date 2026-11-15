@@ -11,7 +11,7 @@
 //   Touch-down ownership: the menu button where it is nearer than a locked key (a view of its own, DmMenuButton), locked keys next (shoulders, − / +, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then in 3D the right stick for a touch in the right third.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
-//   Controls size (DM_CONTROLS_SCALE, 0.75 to 1.35) multiplies the unit of every drawn control: the left stick, the diamond, the D-pad, the shoulders, L3 / R3, − / + and the menu gear; Controls opacity (DM_CONTROLS_OPACITY, 0.3 to 1) dims every control, the menu button too.
+//   Controls size (DM_CONTROLS_SCALE, 0.75 to 1.35) multiplies the unit of every drawn control: the left stick, the diamond, the D-pad, the right stick, the shoulders, L3 / R3, − / + and the menu gear; Controls opacity (DM_CONTROLS_OPACITY, 0.3 to 1) dims every control, the menu button too.
 //     Both are launcher and in-game menu settings that apply while the game runs (front_ios.m dm_setting_live); a diamond key's touch circle stays at least 44 points across.
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame; Super Mario Galaxy's pointer in handheld mode).
 //   The touch sticks and keys hide while a physical controller is connected and return when it is removed. Unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h); DM_PAD_AB=xbox swaps A and B, so bottom = A and right = B (Xbox / PlayStation).
@@ -413,7 +413,7 @@ static int segOf(int style) { for (int i = 0; i < 4; i++) if (k_segStyle[i] == s
 }
 - (CGPoint)rightStickHome { CGPoint d = [self dpadBase]; CGRect s = self.corner; return CGPointMake(CGRectGetMinX(s) + CGRectGetMaxX(s) - d.x, d.y); }   // the fixed right stick: the D-pad's place mirrored (below and inward of the diamond)
 - (CGPoint)stickCentre:(int)i { return i ? ([self fixedR] ? self.rightStickHome : _rCentre) : ([self floatL] && _stick[0] ? _lCentre : self.stickHome); }
-- (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.u : K_STICK_R * self.bu * [self sc:E_STICK]; }
+- (CGFloat)stickR:(int)i { return i ? K_RSTICK_R * self.bu : K_STICK_R * self.bu * [self sc:E_STICK]; }
 - (CGRect)stickZone:(int)i { CGRect b = _layout.controls; CGFloat w = b.size.width * K_RSWIPE; return CGRectMake(i ? CGRectGetMaxX(b) - w : CGRectGetMinX(b), b.origin.y, w, b.size.height); }   // where a floating stick takes touches (the left and right thirds of the controls' area)
 - (BOOL)inRightArea:(CGPoint)p { CGRect b = _layout.controls; return p.x >= CGRectGetMaxX(b) - b.size.width * K_RSWIPE; }
 - (BOOL)inLeftArea:(CGPoint)p { CGRect b = _layout.controls; return p.x <= CGRectGetMinX(b) + b.size.width * K_RSWIPE; }   // the floating left stick's area: the mirror of the right one's
@@ -945,7 +945,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     CAShapeLayer *in = (CAShapeLayer *)_knob.sublayers.firstObject; CGPathRef ip = circlePath(CGPointMake(k, k), k * 0.62);
     in.frame = _knob.bounds; in.path = ip; CGPathRelease(ip);
     setPath(_ringR, circlePath(self.rightStickHome, [self stickR:1]));
-    CGFloat kr = K_KNOB_R * u * 0.8; _knobR.bounds = CGRectMake(0, 0, 2 * kr, 2 * kr);
+    CGFloat kr = K_KNOB_R * bu * 0.8; _knobR.bounds = CGRectMake(0, 0, 2 * kr, 2 * kr);
     setPath(_knobR, circlePath(CGPointMake(kr, kr), kr));
     CAShapeLayer *inR = (CAShapeLayer *)_knobR.sublayers.firstObject; CGPathRef ipR = circlePath(CGPointMake(kr, kr), kr * 0.62);
     inR.frame = _knobR.bounds; inR.path = ipR; CGPathRelease(ipR);
