@@ -263,9 +263,6 @@ $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
 $(B)/t_sf: t_sf.c ../hle_sf.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sf.c ../hle_net_diag.c
-run: $(B)/t_font_work
-$(B)/t_font_work: t_font_work.c ../hle_sdk16.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_font_work.c ../hle_net_diag.c
 $(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c ../hle_net_diag.c
 # nn::vi::ListFrameHistory: the SDK's FrameInfo, newest first, from the present queue's progress
