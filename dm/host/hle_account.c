@@ -112,22 +112,28 @@ static int na_birthday_ok(const char *b) {
 // The country also goes into the object itself. Ryujinx-Nextendo and Mush8 answer the account service, and the SDK copies that answer into the
 // object, so a reader that does not come through the getter taken over below (an SDK-internal call, which no import binding reaches, or a
 // game's own read) still finds it: Mario Kart 8 Deluxe shows Mush8 players' flags and not this host's. The host never runs the copy, so it writes
-// the two letters where the SDK's own GetCountry reads them: the offset of the first `add x<d>, x0, #imm` in the getter's first instructions.
-// A getter of another shape gets nothing written, and the log gives its first words
+// the two letters where the SDK's own GetCountry reads them: the offset of the first `add x<d>, x0, #imm` in the getter's first instructions. The
+// layout is NasUserBase's (birthday, then the country 0x20 later), so GetBirthday's offset (its first such add, or 0 with none before its ret) must be
+// 0x20 below it. Getters of another shape get nothing written, and the log gives their first words
 enum { NA_SCAN = 12 };
+static int na_add_offset(const char *symbol, uint32_t words[NA_SCAN], int *add) {   // the first add's immediate, 0 if ret comes first; -1 for no symbol or neither
+    const uint32_t *code = guest_sym(symbol); *add = 0; if (!code) return -1;
+    for (int n = 0; n < NA_SCAN; n++) {
+        memcpy(&words[n], code + n, 4);
+        if ((words[n] & 0xffc003e0u) == 0x91000000u) { *add = 1; return (int)((words[n] >> 10) & 0xfffu); }
+        if (words[n] == 0xd65f03c0u) return 0;   // ret
+    }
+    return -1;
+}
 static int na_country_offset(void) {
     static int offset = -2; if (offset != -2) return offset;
-    const uint32_t *code = guest_sym("_ZNK2nn7account25CachedNintendoAccountInfo10GetCountryEPm"); uint32_t words[NA_SCAN] = {0}; int n = 0;
-    offset = -1;
-    if (code) for (; n < NA_SCAN; n++) {
-        memcpy(&words[n], code + n, 4);
-        if ((words[n] & 0xffc003e0u) == 0x91000000u) { unsigned imm = (words[n] >> 10) & 0xfffu; if (imm && imm <= 0x200) offset = (int)imm; n++; break; }
-        if (words[n] == 0xd65f03c0u) { n++; break; }   // ret
-    }
-    if (offset >= 0) LOG("account: the SDK's GetCountry reads the object at +%#x: the country is written there", offset);
-    else if (!code) LOG("[RED] account: no SDK GetCountry in the game's modules: the country reaches the game through the getter only");
-    else LOG("[RED] account: the SDK's GetCountry has an unknown shape (%08x %08x %08x %08x %08x %08x): the country reaches the game through the getter only",
-             words[0], words[1], words[2], words[3], words[4], words[5]);
+    uint32_t cw[NA_SCAN] = {0}, bw[NA_SCAN] = {0}; int cadd, badd;
+    int country = na_add_offset("_ZNK2nn7account25CachedNintendoAccountInfo10GetCountryEPm", cw, &cadd);
+    int birthday = na_add_offset("_ZNK2nn7account25CachedNintendoAccountInfo11GetBirthdayEPm", bw, &badd);
+    offset = cadd && birthday >= 0 && country - birthday == 0x20 && country <= 0x200 ? country : -1;
+    if (offset >= 0) LOG("account: the SDK's getters read the birthday at +%#x and the country at +%#x: the country is written there", birthday, offset);
+    else LOG("[RED] account: the SDK's GetCountry (%08x %08x %08x %08x) and GetBirthday (%08x %08x %08x %08x) do not have the expected shape: the country "
+             "reaches the game through the getter only", cw[0], cw[1], cw[2], cw[3], bw[0], bw[1], bw[2], bw[3]);
     return offset;
 }
 HLE_FORCE_WAIT("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "cached Nintendo Account info: the Nextendo account's country and the launcher's birthday; offline none linked, fails", Result, h_acc_LoadNaInfo,

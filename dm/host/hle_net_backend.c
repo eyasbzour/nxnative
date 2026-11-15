@@ -217,11 +217,12 @@ static void net_trace(const char *op, int fd, long result) {
 // Each peer a socket sends to or hears from is watched too, numbered #1, #2... in the order the socket first met it. A peer it heard and still sends
 // to (a send in the last NET_UDP_SENDING_MS) that goes NET_UDP_QUIET_MS without a datagram is logged once, with how many of the socket's other
 // peers it still hears, and again when it is heard; a peer sent to for that long and never heard is logged once. In a Mario Kart 8 Deluxe room of three
-// the game showed 2618-0502 to one player while the other two kept racing, and the socket's own counts could not say which peer stopped. Peers past
-// NET_UDP_PEERS are not watched one by one
+// the game showed 2618-0502 to one player while the other two kept racing: in the last minute that socket received about half as many datagrams as
+// it sent (531 in, 988 out, against about even before), and its own counts could not say whether one peer or both had thinned. Peers past
+// NET_UDP_PEERS are not watched one by one, and the first one left out is logged
 enum { NET_UDP_QUIET_MS = 2000, NET_UDP_SENDING_MS = 1000, NET_UDP_PEERS = 16 };
 typedef struct { uint32_t ip; uint16_t port; uint8_t quiet, unheard; uint64_t in, out, last_in_ms, last_out_ms, first_out_ms, quiet_since_ms; } net_udp_peer;
-typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms, first_out_ms; int quiet, unheard, npeers; net_udp_peer *peers; } net_udp_watch;
+typedef struct { uint64_t generation, in, out, last_in_ms, quiet_since_ms, first_out_ms; int quiet, unheard, npeers, full; net_udp_peer *peers; } net_udp_watch;
 static net_udp_watch g_udp_watch[NET_MAX];
 static pthread_mutex_t g_udp_watch_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_udp_errors_told[2];   // bit n: errno n already logged (receive, send)
@@ -231,10 +232,11 @@ static net_udp_watch *net_udp_entry(const net_ref *r) {   // with g_udp_watch_lo
     return w;
 }
 // The peer's entry (with g_udp_watch_lock held), added on first sight; NULL without an address, or when the socket already watches NET_UDP_PEERS
-static net_udp_peer *net_udp_peer_entry(net_udp_watch *w, const struct sockaddr_in *a) {
+// (*full is set the first time, so the caller logs it)
+static net_udp_peer *net_udp_peer_entry(net_udp_watch *w, const struct sockaddr_in *a, int *full) {
     if (!a || a->sin_family != AF_INET) return NULL;
     for (int i = 0; i < w->npeers; i++) if (w->peers[i].ip == a->sin_addr.s_addr && w->peers[i].port == a->sin_port) return &w->peers[i];
-    if (w->npeers >= NET_UDP_PEERS) return NULL;
+    if (w->npeers >= NET_UDP_PEERS) { if (!w->full) w->full = *full = 1; return NULL; }
     if (!w->peers && !(w->peers = calloc(NET_UDP_PEERS, sizeof *w->peers))) return NULL;
     net_udp_peer *p = &w->peers[w->npeers++]; p->ip = a->sin_addr.s_addr; p->port = a->sin_port; return p;
 }
@@ -268,10 +270,11 @@ static void net_udp_note(const net_ref *r, int received, int sent, const struct 
     uint64_t now = net_ms(); char line[160], peer_line[200]; line[0] = peer_line[0] = 0;
     pthread_mutex_lock(&g_udp_watch_lock);
     net_udp_watch *w = net_udp_entry(r);
-    net_udp_peer *p = net_udp_peer_entry(w, peer);
+    int full = 0; net_udp_peer *p = net_udp_peer_entry(w, peer, &full);
+    if (full) snprintf(peer_line, sizeof peer_line, "net: UDP socket %d: %d peers watched; later ones are not watched one by one", r->guest, NET_UDP_PEERS);
     if (p && received) { p->in++; p->last_in_ms = now; }
     if (p && sent) { p->out++; p->last_out_ms = now; if (!p->first_out_ms) p->first_out_ms = now; }
-    net_udp_peer_lines(r, w, received ? p : NULL, now, peer_line, sizeof peer_line);
+    if (!peer_line[0]) net_udp_peer_lines(r, w, received ? p : NULL, now, peer_line, sizeof peer_line);
     if (sent && !w->first_out_ms) w->first_out_ms = now;
     w->in += (uint64_t)received; w->out += (uint64_t)sent;
     if (received) {
