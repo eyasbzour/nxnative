@@ -11,7 +11,7 @@
 //   Touch-down ownership: the menu button where it is nearer than a locked key (a view of its own, DmMenuButton), locked keys next (shoulders, − / +, L3 / R3), then whichever of the diamond, the D-pad and the left stick has the smallest distance / grab radius (the left stick's grab circle borders the D-pad),
 //     then in 3D the right stick for a touch in the right third.
 //   Everything hugs the edges and corners to leave the picture room; controls sit over the picture, one CAShapeLayer each: a press only swaps the fill, a stick only moves its knob, nothing redraws the whole screen.
-//   Controls size (DM_CONTROLS_SCALE, 0.75 to 1.35) multiplies the unit of the left stick, the diamond and the D-pad; Controls opacity (DM_CONTROLS_OPACITY, 0.3 to 1) dims every control, the menu button too.
+//   Controls size (DM_CONTROLS_SCALE, 0.75 to 1.35) multiplies the unit of every drawn control: the left stick, the diamond, the D-pad, the shoulders, L3 / R3, − / + and the menu gear; Controls opacity (DM_CONTROLS_OPACITY, 0.3 to 1) dims every control, the menu button too.
 //     Both are launcher and in-game menu settings that apply while the game runs (front_ios.m dm_setting_live); a diamond key's touch circle stays at least 44 points across.
 //   Touches no control takes (in 3D, those outside the right third) go to the game's touch screen when DmLayout assigns a local game viewport (pushGame; Super Mario Galaxy's pointer in handheld mode).
 //   The touch sticks and keys hide while a physical controller is connected and return when it is removed. Unclaimed touches go to the game only when a local game viewport exists. Physical controllers keep every button (D-pad and right stick included) and map by position: bottom = B, right = A, left = Y, top = X (same positions as on a Switch controller); a Nintendo pad maps by its labels (pad_apple.h); DM_PAD_AB=xbox swaps A and B, so bottom = A and right = B (Xbox / PlayStation).
@@ -140,7 +140,7 @@ static const CGFloat
     K_RSTICK_R = 60,                                // right stick (not drawn): radius around its centre, the touch-down point
     K_RSWIPE = 1.0 / 3,                             // right stick area: this fraction of the screen width from the right edge (not in u)
     K_CLICK_X = 102, K_CLICK_R = 17,                // L3 / R3: centre from the outer edge (level with ZL / ZR), radius
-    K_SCALE_MIN = 0.75, K_SCALE_MAX = 1.35,         // Controls size (DM_CONTROLS_SCALE): times the unit of the stick, the diamond and the D-pad; at 0.75 a diamond key's touch circle is still 44 points across (K_HIT_MIN)
+    K_SCALE_MIN = 0.75, K_SCALE_MAX = 1.35,         // Controls size (DM_CONTROLS_SCALE): times the unit of every drawn control; at 0.75 a diamond key's touch circle is still 44 points across (K_HIT_MIN)
     K_OPACITY_MIN = 0.3,                            // Controls opacity (DM_CONTROLS_OPACITY): how solid every control is, 1 as drawn
     K_HIT_MIN = 22,                                 // a diamond key's touch circle: radius, at least this
     K_MENU_IDLE = 3.0;                              // seconds a connected controller leaves the menu gear visible before fading it out
@@ -365,7 +365,7 @@ static CATextLayer *label(CALayer *parent, NSString *s) {
 - (CGRect)safe { return CGRectIntersection(_layout.controls, UIEdgeInsetsInsetRect(self.bounds, dm_game_safe_insets(self.bounds, self.safeAreaInsets, _layout.topSafeOnly))); }
 - (CGRect)corner { if (_layout.separated) return self.safe; UIEdgeInsets i = self.safeAreaInsets; i.left *= K_CORNER_IN; i.right *= K_CORNER_IN; return UIEdgeInsetsInsetRect(self.bounds, i); }   // the rectangle the bottom-corner controls use
 - (CGFloat)u { if (_layout.separated) { CGRect s = self.safe; return MIN(MIN(s.size.height / 430.0, s.size.width / 700.0), 1.3); } return MIN(self.bounds.size.height / 430.0, 1.3); }   // 1 = 430 points tall (iPhone Pro Max landscape)
-- (CGFloat)bu { return self.u * g_scale; }   // the unit of the bottom controls (stick, diamond, D-pad): the layout's unit times Controls size
+- (CGFloat)bu { return self.u * g_scale; }   // the unit of the drawn controls (the bottom ones, the shoulders, L3 / R3, − / + and the menu gear): the layout's unit times Controls size
 static CGPoint side(CGRect s, int right, CGFloat dx, CGFloat y) { return CGPointMake(right ? CGRectGetMaxX(s) - dx : CGRectGetMinX(s) + dx, y); }
 static CGPoint add(CGPoint a, CGPoint b) { return CGPointMake(a.x + b.x, a.y + b.y); }
 static int elemOf(int b) {   // the control a locked key belongs to
@@ -430,21 +430,21 @@ static int segOf(int style) { for (int i = 0; i < 4; i++) if (k_segStyle[i] == s
 - (CGFloat)dpadR { return K_DPAD_R * self.bu * [self sc:E_DPAD]; }
 static BOOL isDrop(int b) { return b == B_ZL || b == B_L || b == B_ZR || b == B_R; }
 static BOOL isClick(int b) { return b == B_LS || b == B_RS; }
-- (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; BOOL z = b == B_ZL || b == B_ZR;
+- (CGPoint)dropCenter:(int)b { CGRect s = self.safe; CGFloat u = self.bu; BOOL z = b == B_ZL || b == B_ZR;
     CGFloat edge = _layout.separated ? 22 : 0;
     return add(side(s, b == B_ZR || b == B_R, MAX((z ? K_ZL_X : K_L_X) * u, edge), CGRectGetMinY(s) + MAX((z ? K_ZL_Y : K_L_Y) * u, edge)), [self off:elemOf(b)]); }
-- (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.u * [self sc:elemOf(b)]; }
-- (CGPoint)clickCenter:(int)b { CGRect s = self.safe; CGFloat u = self.u; CGFloat edge = _layout.separated ? 22 : 0;
+- (CGFloat)dropR:(int)b { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * self.bu * [self sc:elemOf(b)]; }
+- (CGPoint)clickCenter:(int)b { CGRect s = self.safe; CGFloat u = self.bu; CGFloat edge = _layout.separated ? 22 : 0;
     return add(side(s, b == B_RS, MAX(K_CLICK_X * u, edge), CGRectGetMinY(s) + MAX(K_ZL_Y * u, edge)), [self off:elemOf(b)]); }
-- (CGFloat)clickR:(int)b { return K_CLICK_R * self.u * [self sc:elemOf(b)]; }
-- (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.u, k = [self sc:elemOf(b)], w = K_PILL_W * u * k, h = K_PILL_H * u * k;
+- (CGFloat)clickR:(int)b { return K_CLICK_R * self.bu * [self sc:elemOf(b)]; }
+- (CGRect)pillRect:(int)b { CGRect s = self.safe; CGFloat u = self.bu, k = [self sc:elemOf(b)], w = K_PILL_W * u * k, h = K_PILL_H * u * k;
     CGPoint c = add(CGPointMake(CGRectGetMidX(s) + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u, CGRectGetMinY(s) + MAX(K_PILL_Y * u, _layout.separated ? 14 : 0)), [self off:elemOf(b)]);   // − on the left, + on the right
     return CGRectMake(c.x - w / 2, c.y - h / 2, w, h); }
-- (CGPoint)menuCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + MAX(K_PILL_Y * self.u, _layout.separated ? 14 : 0)); }
+- (CGPoint)menuCenter { CGRect s = self.safe; return CGPointMake(CGRectGetMidX(s), CGRectGetMinY(s) + MAX(K_PILL_Y * self.bu, _layout.separated ? 14 : 0)); }
 
 static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); }
 - (CGFloat)buttonDistance:(int)b point:(CGPoint)p {
-    CGFloat u = self.u;
+    CGFloat u = self.bu;
     if (isDrop(b)) return dist(p, [self dropCenter:b]) / MAX([self dropR:b] * 1.35, _layout.separated ? 22 : 0);
     if (isClick(b)) return dist(p, [self clickCenter:b]) / MAX(K_CLICK_R * u * 1.35, _layout.separated ? 22 : 0);
     if (b <= B_Y) return dist(p, [self facePos:b]) / MAX([self faceRof:b] * 1.35, _layout.separated ? 22 : 0);   // a split key
@@ -467,7 +467,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     }
     return best;
 }
-- (CGFloat)menuDistance:(CGPoint)p { return dist(p, self.menuCenter) / MAX(K_MENU_R * self.u * 1.6, 22); }
+- (CGFloat)menuDistance:(CGPoint)p { return dist(p, self.menuCenter) / MAX(K_MENU_R * self.bu * 1.6, 22); }
 - (BOOL)menuTakes:(CGPoint)p {   // the menu button takes a touch in its hit circle unless a locked key's target is nearer (the drawn keys are hidden in Tap and with a controller)
     CGFloat d = [self menuDistance:p]; if (d > 1) return NO;
     if (_tap || _padOff || (_layout.separated && !CGRectContainsPoint(_layout.controls, p))) return YES;
@@ -911,7 +911,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
-    CGFloat u = self.u, bu = self.bu;
+    CGFloat bu = self.bu;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     CGFloat scale = MAX(self.traitCollection.displayScale, 1);
     for (int b = 0; b < B_N; b++) if (_label[b] && _label[b].contentsScale != scale) {
@@ -922,12 +922,12 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     for (int i = 0; i < (int)(sizeof k_btns / sizeof *k_btns); i++) { int b = k_btns[i];
         if (isDrop(b)) {
             BOOL right = b == B_ZR || b == B_R; CGPoint c = [self dropCenter:b];
-            CGFloat k = [self sc:elemOf(b)]; setPath(_key[b], dropPath(c, [self dropR:b], right ? -M_PI_4 : -3 * M_PI_4, 4 * u * k)); placeLabel(_label[b], c, 16 * u * k);   // tip toward the near top corner
+            CGFloat k = [self sc:elemOf(b)]; setPath(_key[b], dropPath(c, [self dropR:b], right ? -M_PI_4 : -3 * M_PI_4, 4 * bu * k)); placeLabel(_label[b], c, 16 * bu * k);   // tip toward the near top corner
         } else if (isClick(b)) {
-            CGPoint c = [self clickCenter:b]; setPath(_key[b], circlePath(c, [self clickR:b])); placeLabel(_label[b], c, 13 * u * [self sc:elemOf(b)]);
+            CGPoint c = [self clickCenter:b]; setPath(_key[b], circlePath(c, [self clickR:b])); placeLabel(_label[b], c, 13 * bu * [self sc:elemOf(b)]);
         } else {
             CGRect rc = [self pillRect:b];
-            setPath(_key[b], CGPathCreateWithRoundedRect(rc, rc.size.height / 2, rc.size.height / 2, NULL)); placeLabel(_label[b], CGPointMake(CGRectGetMidX(rc), CGRectGetMidY(rc)), 18 * u * [self sc:elemOf(b)]);
+            setPath(_key[b], CGPathCreateWithRoundedRect(rc, rc.size.height / 2, rc.size.height / 2, NULL)); placeLabel(_label[b], CGPointMake(CGRectGetMidX(rc), CGRectGetMidY(rc)), 18 * bu * [self sc:elemOf(b)]);
         }
     }
     static const struct { int b; CGFloat angle; } arms[] = {{B_UP, 0}, {B_RIGHT, M_PI_2}, {B_DOWN, M_PI}, {B_LEFT, -M_PI_2}};   // the same arm in 90° steps
@@ -935,10 +935,10 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     for (int i = 0; i < 4; i++) { setPath(_key[arms[i].b], armPath(self.dpadCenter, self.dpadR, K_ARM_W * bu * ds, K_ARM_IN * bu * ds, arms[i].angle, 6 * bu * ds));
         CGFloat mid = (K_ARM_IN * bu * ds + self.dpadR) / 2; CGPoint dc = self.dpadCenter;   // a label the player gave the arm sits on its middle
         placeLabel(_label[arms[i].b], CGPointMake(dc.x + sin(arms[i].angle) * mid, dc.y - cos(arms[i].angle) * mid), 14 * bu * ds); }
-    CGFloat mr = K_MENU_R * u; CGPoint mc = self.menuCenter;
+    CGFloat mr = K_MENU_R * bu; CGPoint mc = self.menuCenter;
     _menu.frame = CGRectMake(mc.x - mr, mc.y - mr, 2 * mr, 2 * mr); _menu.layer.cornerRadius = mr;
     _menu.layer.shadowPath = [UIBezierPath bezierPathWithOvalInRect:_menu.bounds].CGPath;
-    [_menu setImage:[UIImage systemImageNamed:@"gearshape.fill" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 * u weight:UIImageSymbolWeightSemibold]] forState:UIControlStateNormal];
+    [_menu setImage:[UIImage systemImageNamed:@"gearshape.fill" withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:13 * bu weight:UIImageSymbolWeightSemibold]] forState:UIControlStateNormal];
     setPath(_ring, circlePath(self.stickHome, [self stickR:0]));
     CGFloat k = K_KNOB_R * bu * [self sc:E_STICK]; _knob.bounds = CGRectMake(0, 0, 2 * k, 2 * k);
     setPath(_knob, circlePath(CGPointMake(k, k), k));

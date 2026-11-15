@@ -877,9 +877,10 @@ static BOOL gDuoHarnessReduceMotionEnabled;
     dm_setting_live("DM_SHOW_FPS", "0"); XCTAssertTrue(fps.hidden);
 
     UIView *pad = [root valueForKey:@"pad"];
-    CGFloat ring = [self largestShapePathBoundsInLayer:pad.layer].size.width;
+    CGFloat ring = [self largestShapePathBoundsInLayer:pad.layer].size.width, gear = ((UIView *)[pad valueForKey:@"menu"]).frame.size.width;
     dm_setting_live("DM_CONTROLS_SCALE", "1.2"); [pad layoutIfNeeded];
     XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, ring * 1.2, 0.5, @"Controls size applies at once");
+    XCTAssertEqualWithAccuracy(((UIView *)[pad valueForKey:@"menu"]).frame.size.width, gear * 1.2, 0.5, @"to the top row too (the menu gear)");
     dm_setting_live("DM_CONTROLS_SCALE", "1.0"); [pad layoutIfNeeded];
     XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, ring, 0.5);
     dm_setting_live("DM_CONTROLS_OPACITY", "0.5");
