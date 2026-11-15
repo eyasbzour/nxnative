@@ -1067,6 +1067,14 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Check:** `make -C dm/host/tests GAME=<id> nextendo-api` (profile read; history is refused before any request) and `nextendo-social` (the description from the field, a field that does not end its strings).
 - **Found on:** Mario Kart 8 Deluxe 4.0.1 and Super Mario Bros. Wonder 1.2.1 on an iPhone, 2026-11-14. On a device both games showed one minute that did not grow: Mario Kart's run had loaded its modules before the launcher set `DM_NETWORK`, so no session started, and Wonder's history requests were refused (`/api/history answered HTTP 401`, see "Nextendo's account routes take different tokens"). With the game token the write answered 403 on 2026-11-15, and the sender was removed. The account's Mii is not read on a device: `/api/profile` takes only a web session (see "Nextendo's account routes take different tokens").
 
+### Other players see no flag for a Nextendo player on this host
+
+- **Symptom:** in Nextendo mode, Mario Kart 8 Deluxe shows a flag for Mush8 players in an online room and none for this host's player, though the log has `account: Nintendo Account info: country set`.
+- **Cause:** the host takes over `LoadCachedNintendoAccountInfo` and the object's getters and never wrote the object. Mush8 and Ryujinx-Nextendo answer the account service's NasUserBase (country at 0x20), and the SDK copies it into the object, so every reader finds the country there. A takeover binds only the game's imports: an SDK-internal call to `GetCountry`, or a read of the field itself, never reaches the host's getter and found an empty object. Which of those Mario Kart 8 Deluxe uses is not known.
+- **Fix:** `hle_account.c` `na_country_offset` finds where the SDK's own `GetCountry` reads the object (the first `add x<d>, x0, #imm` in its first instructions) and the load writes the two letters and a NUL there. A getter of another shape writes nothing and logs `[RED] account: the SDK's GetCountry has an unknown shape` with its first words. The offset found is logged once (`account: the SDK's GetCountry reads the object at +<offset>`), and so is the first call the host's getter answers (`account: the game asked for the Nintendo Account country`).
+- **Check:** none without a device; the next online room shows whether the flag appears, and the two lines show which path the game took.
+- **Found on:** Mario Kart 8 Deluxe 4.0.1 on an iPhone (controls-14), 2026-11-15, in rooms with Mush8 players.
+
 ### A Nextendo presence update holds the game's thread
 
 - **Symptom:** in Nextendo mode, changing menus in an online game takes a moment longer than offline, most on the first visit or on a slow network.

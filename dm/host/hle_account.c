@@ -99,8 +99,8 @@ HLE_FORCE_WAIT("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0
 HLE_FORCE("_ZN2nn7account40ShowLicenseRequirementsForNetworkServiceERKNS0_10UserHandleE", "online membership notice applet, out of scope; cut", Result, h_acc_ShowLic, const UserHandle *h) { (void)h; return acc_note("ShowLicenseRequirementsForNetworkService", RES_FAIL, ACC_NONE); }
 // The Nintendo Account's cached profile (birthday, country). Offline no Nintendo Account is linked, so loading fails and the game skips its getters (Big Brain Academy:
 // Brain vs. Brain, main+0xab8bc). In Nextendo mode, with the account signed in, it loads, as Ryujinx-Nextendo and Mush8 answer the account service's 0x68-byte NasUserBase
-// (birthday at 0, country at 0x20) that the SDK copies into this object. The host never writes the object, whose layout in a given SDK is unchecked: it takes over the
-// object's four getters, which return a string and its length. Country: the Nextendo account's (dm_nextendo_account_country), else the device's region (DM_NEXTENDO_COUNTRY,
+// (birthday at 0, country at 0x20) that the SDK copies into this object. The host takes over the object's four getters, which return a string and its length, and
+// writes only the country into the object, where the SDK's own GetCountry reads it (na_country_offset). Country: the Nextendo account's (dm_nextendo_account_country), else the device's region (DM_NEXTENDO_COUNTRY,
 // which the launcher sets), else none. Birthday: the Nextendo account's (dm_nextendo_account_birthday), else the launcher's picker (DM_NEXTENDO_BIRTHDAY, YYYY-MM-DD), else 2000-01-01, the date both of those clients send. Gender and region: none
 static char na_country[3], na_birthday[11] = "2000-01-01";   // set by a successful load, before the game reads the getters
 static int na_country_ok(const char *c) { return c && c[0] >= 'A' && c[0] <= 'Z' && c[1] >= 'A' && c[1] <= 'Z' && !c[2]; }
@@ -109,9 +109,30 @@ static int na_birthday_ok(const char *b) {
     for (int i = 0; i < 10; i++) if (i != 4 && i != 7 && (b[i] < '0' || b[i] > '9')) return 0;
     int month = (b[5] - '0') * 10 + b[6] - '0', day = (b[8] - '0') * 10 + b[9] - '0'; return month >= 1 && month <= 12 && day >= 1 && day <= 31;
 }
+// The country also goes into the object itself. Ryujinx-Nextendo and Mush8 answer the account service, and the SDK copies that answer into the
+// object, so a reader that does not come through the getter taken over below (an SDK-internal call, which no import binding reaches, or a
+// game's own read) still finds it: Mario Kart 8 Deluxe shows Mush8 players' flags and not this host's. The host never runs the copy, so it writes
+// the two letters where the SDK's own GetCountry reads them: the offset of the first `add x<d>, x0, #imm` in the getter's first instructions.
+// A getter of another shape gets nothing written, and the log gives its first words
+enum { NA_SCAN = 12 };
+static int na_country_offset(void) {
+    static int offset = -2; if (offset != -2) return offset;
+    const uint32_t *code = guest_sym("_ZNK2nn7account25CachedNintendoAccountInfo10GetCountryEPm"); uint32_t words[NA_SCAN] = {0}; int n = 0;
+    offset = -1;
+    if (code) for (; n < NA_SCAN; n++) {
+        memcpy(&words[n], code + n, 4);
+        if ((words[n] & 0xffc003e0u) == 0x91000000u) { unsigned imm = (words[n] >> 10) & 0xfffu; if (imm && imm <= 0x200) offset = (int)imm; n++; break; }
+        if (words[n] == 0xd65f03c0u) { n++; break; }   // ret
+    }
+    if (offset >= 0) LOG("account: the SDK's GetCountry reads the object at +%#x: the country is written there", offset);
+    else if (!code) LOG("[RED] account: no SDK GetCountry in the game's modules: the country reaches the game through the getter only");
+    else LOG("[RED] account: the SDK's GetCountry has an unknown shape (%08x %08x %08x %08x %08x %08x): the country reaches the game through the getter only",
+             words[0], words[1], words[2], words[3], words[4], words[5]);
+    return offset;
+}
 HLE_FORCE_WAIT("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNintendoAccountInfoERKNS0_10UserHandleEPvm", "cached Nintendo Account info: the Nextendo account's country and the launcher's birthday; offline none linked, fails", Result, h_acc_LoadNaInfo,
           void *info, const UserHandle *h, void *buf, uint64_t sz) {
-    (void)info; if (buf && sz) memset(buf, 0, sz);
+    if (buf && sz) memset(buf, 0, sz);
     uint8_t available = 0; Result r = online_user(h) ? dm_nextendo_account_available(&available) : RES_FAIL; if (!r && !available) r = RES_FAIL;
     if (!r) {
         char country[3] = {0}; if (dm_nextendo_account_country(country) || !na_country_ok(country)) country[0] = 0;
@@ -119,13 +140,17 @@ HLE_FORCE_WAIT("_ZN2nn7account29LoadCachedNintendoAccountInfoEPNS0_25CachedNinte
         char account[11] = {0}; int own = !dm_nextendo_account_birthday(account) && na_birthday_ok(account);
         const char *birthday = own ? account : getenv("DM_NEXTENDO_BIRTHDAY");
         memcpy(na_country, country, 3); memcpy(na_birthday, na_birthday_ok(birthday) ? birthday : "2000-01-01", 11);
+        int at = info && na_country[0] ? na_country_offset() : -1; if (at >= 0) memcpy((uint8_t *)info + at, na_country, 3);
         static int told; if (!told++) LOG("account: Nintendo Account info: country %s, birthday %s", na_country[0] ? "set" : "none",
                                           own ? "from the Nextendo account" : na_birthday_ok(birthday) ? "from the launcher" : "2000-01-01");
     }
     return acc_note("LoadCachedNintendoAccountInfo", r, online_user(h) ? ACC_NONE : ACC_NOT_LOCAL);
 }
 static const char *na_string(const char *s, uint64_t *n) { if (n) *n = strlen(s); return s; }
-HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo10GetCountryEPm", "the loaded Nintendo Account country (two letters, or none)", const char *, h_acc_NaCountry, const void *self, uint64_t *n) { (void)self; return na_string(na_country, n); }
+HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo10GetCountryEPm", "the loaded Nintendo Account country (two letters, or none)", const char *, h_acc_NaCountry, const void *self, uint64_t *n) {
+    (void)self; static int told; if (!told++) LOG("account: the game asked for the Nintendo Account country (%s)", na_country[0] ? na_country : "none");
+    return na_string(na_country, n);
+}
 HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo11GetBirthdayEPm", "the loaded Nintendo Account birthday, YYYY-MM-DD", const char *, h_acc_NaBirthday, const void *self, uint64_t *n) { (void)self; return na_string(na_birthday, n); }
 HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo9GetGenderEPm", "Nintendo Account gender: none", const char *, h_acc_NaGender, const void *self, uint64_t *n) { (void)self; return na_string("", n); }
 HLE_FORCE("_ZNK2nn7account25CachedNintendoAccountInfo9GetRegionEPm", "Nintendo Account region: none", const char *, h_acc_NaRegion, const void *self, uint64_t *n) { (void)self; return na_string("", n); }
