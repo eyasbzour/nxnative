@@ -72,14 +72,25 @@ class LauncherSettingsTests(unittest.TestCase):
         s = build(BOTW, 'nvn')['DM_SHOW_FPS']
         self.assertEqual((s['on'], s['off']), ('1', '0'))
 
-    def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter and touch feedback are the iOS front end's (front_ios.m, DmGamepad.m)
+    def test_iphone_switches_only_on_the_iphone(self):   # the frame-rate counter, touch feedback and the touch player are the iOS front end's (front_ios.m, DmGamepad.m)
         ios, mac = build(BOTW, 'nvn'), build(BOTW, 'nvn', 'mac')
         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
-        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT'})
+        self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_PAD_EDIT', 'DM_CONTROLS_SCALE', 'DM_CONTROLS_OPACITY', 'DM_TOUCH_PLAYER'})
         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
         self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
         s = mac['DM_FULLSCREEN']
         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
+
+    def test_controls_size_and_opacity_are_in_game_menu_choices_on_the_iphone(self):   # a choice, so the in-game menu offers it (it holds no sliders) and DmGamepad.m applies it at once
+        ios = build(BOTW, 'nvn')
+        size, opacity = ios['DM_CONTROLS_SCALE'], ios['DM_CONTROLS_OPACITY']
+        self.assertEqual((size['kind'], size['section'], size['default']), ('choice', 'Controls', '1.0'))
+        self.assertEqual((opacity['kind'], opacity['section'], opacity['default']), ('choice', 'Controls', '1.0'))
+        self.assertEqual((float(size['options'][0][0]), float(size['options'][-1][0])), (0.75, 1.35))   # DmGamepad.m K_SCALE_MIN, K_SCALE_MAX
+        self.assertEqual((float(opacity['options'][0][0]), float(opacity['options'][-1][0])), (0.3, 1.0))   # K_OPACITY_MIN, 1
+        self.assertNotIn('DM_CONTROLS_SCALE', build(BOTW, 'nvn', 'mac'))
+        order = list(ios)
+        self.assertEqual(order[order.index('DM_TOUCH_HAPTICS') + 1:][:2], ['DM_CONTROLS_SCALE', 'DM_CONTROLS_OPACITY'])
 
     def test_defaults_follow_each_platform_host(self):
         # nvn_mtl.m pso4_on: Mac defaults on, iOS follows the profile. nvn_rec.h rec_on: iOS on, Mac off.
@@ -88,6 +99,14 @@ class LauncherSettingsTests(unittest.TestCase):
                 ios, mac = build(gid, 'nvn', 'ios'), build(gid, 'nvn', 'mac')
                 self.assertEqual((ios['DM_PSO_MTL4']['default'], ios['DM_NVN_ENC_THREAD']['default']), (ios_pso, '1'))
                 self.assertEqual((mac['DM_PSO_MTL4']['default'], mac['DM_NVN_ENC_THREAD']['default']), ('1', '0'))
+
+    def test_network_offers_nextendo_only_in_a_nextendo_build(self):   # build_ipa.sh DM_NEXTENDO / DM_NETWORK (the NSP script's --nextendo)
+        values = lambda rows: [o[0] for o in rows['DM_NETWORK']['options']]
+        plain = build(WONDER, 'nvn')
+        self.assertEqual((values(plain), plain['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'auto'], 'offline'))
+        with patch.dict(os.environ, {'DM_NEXTENDO': '1', 'DM_NETWORK': 'nextendo'}):
+            online = build(WONDER, 'nvn')
+        self.assertEqual((values(online), online['DM_NETWORK']['default']), (['offline', 'lan', 'ldn', 'nextendo', 'auto'], 'nextendo'))
 
     def test_unknown_platform_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, 'SETTINGS_PLATFORM must be ios or mac'):
@@ -160,6 +179,14 @@ class LauncherSettingsTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 profile = type('Profile', (), {'id': BOTW, 'get': lambda self, key, default='', bad=bad: bad})()
                 with self.assertRaises(SystemExit): settings.render_base(profile)
+
+    def test_internal_resolution_for_nvn_games_without_their_own_render_scale(self):   # DM_RESCALE (nvn_mtl.m); a stub's Render scale takes its place
+        self.assertEqual({k: v for k, v in build(WONDER, 'nvn')['DM_RESCALE'].items() if k in ('min', 'max', 'default')}, {'min': 0.5, 'max': 1.0, 'default': '1.0'})
+        self.assertNotIn('DM_RESCALE', build(WONDER, 'vulkan'))
+        with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']), patch.dict(os.environ, {'GFXAPI': 'nvn'}):
+            (Path(tmp) / 'main.fixups.tsv').write_text('# RENDER_SCALE\t1\n')
+            rows = {s['env'] for s in settings.build(BOTW, tmp, Path(tmp) / 'control.nacp')['settings']}
+        self.assertEqual(('DM_RENDER_SCALE' in rows, 'DM_RESCALE' in rows), (True, False))
 
     def test_render_scale_reaches_the_stubs_largest_scale(self):
         """The rewriter writes a render-scale stub's largest scale as RENDER_SCALE: 1 keeps the table's range (a stub that only lowers the size), 3 raises its top (Hades II)"""

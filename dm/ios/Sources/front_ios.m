@@ -8,27 +8,35 @@
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
+#include <stdatomic.h>   // g_screen_hz: read on the main thread, used from the render thread (front_screen_max_fps)
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
 #include "save_sync.h"
+#include "home_quit.h"
+#import <GameController/GameController.h>
 #import "CloudSaves.h"
+#import "quit_prompt.h"
 
 void dm_gamepad_active(void);
+void dm_gamepad_pads_read(void);
+static void quit_close(void);
 #import "DmLayout.h"
 #import "DmGameMenu.h"
 
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 const char *front_ios_boot_message(void);   // main.m: why a build that keeps the game files off the IPA found none usable (NULL = the generic hint)
-const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported); makes the first Metal device
+const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported)
+bool front_ios_hud_enabled_from_saved_choice(void);   // main.m: the saved choice enabled Metal's HUD at launch
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
 
 static CAMetalLayer *g_layer;
 static void front_ios_notify_setup(void);
 static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
+static void screen_refresh(void);
 static void front_ios_audio_watch(void);
 static UILabel *front_ios_fps_label(void);
 
@@ -49,7 +57,7 @@ static UILabel *front_ios_fps_label(void);
     }
     return self;
 }
-- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }   // the phone's screen or a TV's (DmTVSceneDelegate)
+- (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; screen_refresh(); }   // the phone's screen or a TV's (DmTVSceneDelegate)
 - (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
@@ -57,6 +65,7 @@ static UILabel *front_ios_fps_label(void);
     CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
+    screen_refresh();   // an iPad window moved to another display lays out again (the display scale trait above)
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
 }
 @end
@@ -148,6 +157,9 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.game) return;
     dm_cloud_saves_env();   // DM_SAVE_SYNC from the launcher's Cloud saves pick, before the game's first save mount reads it (CloudSaves.m, save_sync.h)
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
+    // Metal reads MTL_HUD_ENABLED once, at that device: set whatever the launcher chose, so the in-game menu's Performance HUD can show it later. The game layer's
+    // developerHUDProperties (mode default or disabled: viewDidLoad, dm_setting_live) decide whether it is on screen. An env file's MTL_HUD_ENABLED=0 stays
+    setenv("MTL_HUD_ENABLED", "1", 0); setenv("MTL_HUD_HIDE_METALFX_METRICS", "1", 0);
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
     {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
@@ -167,7 +179,9 @@ static void launcher_done(void) { [g_root startGame]; }
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
-    if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
+    BOOL hud = getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"));   // Apple's HUD over the game: frame rate, frame and GPU time, memory; off is mode disabled, since MTL_HUD_ENABLED is always set
+    g_layer.developerHUDProperties = @{@"mode": hud ? @"default" : @"disabled"};
+    if (hud) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
     dm_haptics_apple_init();
     self.pad = dm_gamepad_view(self.view.bounds);
     self.pad.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -274,6 +288,10 @@ void front_picture_shape(int w, int h) {   // front.h: the views take the presen
 // dock (the operation mode change notification); while a TV shows the picture the game stays docked, and the choice applies when the TV is unplugged
 bool dm_setting_live(const char *env, const char *value) {
     if (!env || !g_root.game) return false;
+    if (!strcmp(env, "DM_METAL_HUD")) {   // the layer's HUD mode (startGame keeps MTL_HUD_ENABLED set for this)
+        if (value) { int on = atoi(value) != 0; g_layer.developerHUDProperties = @{@"mode": on ? @"default" : @"disabled"}; LOG("front end: Metal performance HUD %s (in-game menu)", on ? "on" : "off"); }
+        return true;
+    }
     if (!strcmp(env, "DM_PICTURE_FIT")) {
         if (value) { g_root.fill = dm_picture_fill(value); [g_root.view setNeedsLayout]; LOG("front end: picture %s (in-game menu)", g_root.fill ? "Fill" : "Fit"); }
         return true;
@@ -287,6 +305,8 @@ bool dm_setting_live(const char *env, const char *value) {
     }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
+    if (!strcmp(env, "DM_CONTROLS_SCALE")) { if (value) dm_gamepad_scale(value); return true; }
+    if (!strcmp(env, "DM_CONTROLS_OPACITY")) { if (value) dm_gamepad_opacity(value); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
     return false;
 }
@@ -314,9 +334,11 @@ static void front_ios_power_watch(void) {
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
-    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
-        (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); }];
-    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off");
+    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); screen_refresh(); }];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIScreenModeDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; screen_refresh(); }];
+    screen_refresh();
+    LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s, screen %d Hz", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off", front_screen_max_fps());
 }
 
 // Frame-rate counter: the frames put on screen in the last second (nvn_mtl.m counts them for NVN and for the Vulkan layer alike; frames the display link merged away are not counted).
@@ -372,6 +394,23 @@ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape 
     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
     if (a <= 0 || c <= 0) return 0;
     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
+}
+// The highest frame rate of the screen the game is shown on (front.h), which the 120 fps path needs at 120: hle_nvn.c high_cap_tick caps at 60 on a screen below 120 Hz,
+// and the display link follows it (nvn_mtl.m link_range, link_sync). Read on the main thread, as the Mac front end does (front_mac.m screen_refresh), whenever it can change:
+// at launch, when the game view moves to a window (the phone's, or a TV's: its own rate, as the picture is there) or lays out (an iPad window moved to another display),
+// when the screen's mode changes and when Low Power Mode is turned on or off. Low Power Mode holds a ProMotion screen at 60 Hz, so the rate is 60 then, whatever
+// maximumFramesPerSecond says. Before the game view has a window: the app's own scene (UIScreen.mainScreen is deprecated in iOS 26). 0 until read
+static _Atomic int g_screen_hz;
+int front_screen_max_fps(void) { return atomic_load_explicit(&g_screen_hz, memory_order_relaxed); }
+static void screen_refresh(void) {
+    UIWindowScene *ws = (g_root.game ?: g_root.view).window.windowScene;
+    if (!ws) for (UIScene *s in UIApplication.sharedApplication.connectedScenes)
+        if ([s isKindOfClass:UIWindowScene.class] && [s.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) { ws = (UIWindowScene *)s; break; }
+    int hz = ws ? (int)ws.screen.maximumFramesPerSecond : 0, lpm = dm_low_power_now();
+    if (hz <= 0) return;   // no screen yet: keep what was read
+    if (lpm && hz > 60) hz = 60;
+    int was = atomic_exchange_explicit(&g_screen_hz, hz, memory_order_relaxed);
+    if (was && was != hz) LOG("front end: screen %d Hz → %d Hz%s", was, hz, lpm ? " (Low Power Mode)" : "");
 }
 // Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
 // shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch
@@ -448,6 +487,42 @@ void front_program_handoff(int index, const char *name) {   // front.h; on the g
 }
 void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
+// The account applet offers only choices allowed by the host. Native actions keep
+// the choice with the player, including creation, skip and cancellation.
+int front_user_select(const front_user *users, int count, int allow_create, int allow_skip) {
+    if (!g_layer) return FRONT_USER_CANCEL;
+    __block int result = FRONT_USER_CANCEL;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class])
+            for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        if (!vc || vc.isBeingDismissed) { dispatch_semaphore_signal(done); return; }
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Choose a user" message:@"Choose who will play. Each user keeps separate progress." preferredStyle:UIAlertControllerStyleAlert];
+        for (int i = 0; i < count; i++) {
+            int slot = users[i].slot;
+            NSString *title = [NSString stringWithFormat:@"%s (user %d)%s", users[i].nickname, slot + 1, users[i].open ? " - in use" : ""];
+            [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+                (void)a; result = slot; dispatch_semaphore_signal(done);
+            }]];
+        }
+        if (allow_create) [alert addAction:[UIAlertAction actionWithTitle:@"Add user" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a; result = FRONT_USER_CREATE; dispatch_semaphore_signal(done);
+        }]];
+        if (allow_skip) [alert addAction:[UIAlertAction actionWithTitle:@"Skip" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+            (void)a; result = FRONT_USER_SKIP; dispatch_semaphore_signal(done);
+        }]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *a) {
+            (void)a; dispatch_semaphore_signal(done);
+        }]];
+        dm_gamepad_reset();
+        [vc presentViewController:alert animated:YES completion:nil];
+    });
+    dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    return result;
+}
+
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     (void)max_chars;
@@ -496,6 +571,13 @@ void front_save_failed(int err) {
 // the category is Playback, as a game's or media app's: the ring / silent switch does not mute it (the default SoloAmbient follows the switch, which silenced the game whenever the phone was on silent) and it still interrupts other apps' audio.
 // Set once at boot and again on return to the foreground (the system may reset it after an interruption)
 static int g_session_off;   // the last activation failed (another app or a call still held the session): tried again when the app becomes active
+// Six channels when the route takes them (HDMI, a multichannel interface or dock): the session's maximum is the route's, and it stays 2 on headphones, AirPods included.
+// Asked at activation and again on each route change (front_ios_audio_watch), since a preference does not carry from one route to the next
+static void front_ios_audio_channels(AVAudioSession *s) {
+    NSError *e = nil; NSInteger most = s.maximumOutputNumberOfChannels, want = most >= 6 ? 6 : 2;
+    if (want > 2 && ![s setPreferredOutputNumberOfChannels:want error:&e]) LOG("[RED] audio session: %ld output channels could not be set: %s", (long)want, e.localizedDescription.UTF8String);
+    LOG("audio session: route %s, output channels %ld (route maximum %ld)", s.currentRoute.outputs.firstObject.portType.UTF8String ?: "(none)", (long)s.outputNumberOfChannels, (long)most);
+}
 void front_ios_audio_session(void) {
     AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
     if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) LOG("[RED] audio session category could not be set: %s", e.localizedDescription.UTF8String);
@@ -504,7 +586,10 @@ void front_ios_audio_session(void) {
     g_session_off = ![s setActive:YES error:&e];
     if (g_session_off) LOG("[RED] audio session activation failed: %s", e.localizedDescription.UTF8String);
     LOG("audio session: sample rate %.0f Hz, I/O buffer %.2f ms (asked for 5 ms)", s.sampleRate, s.IOBufferDuration * 1000);
+    front_ios_audio_channels(s);
 }
+// The channels the route takes now (hle_audio.c decides the output from it: six only when the session has six)
+int dm_ios_output_channels(void) { return (int)AVAudioSession.sharedInstance.outputNumberOfChannels; }
 
 // Real audio output is suspended (the silent sink paces the game) while the app is in the background or another audio session has interrupted ours (Siri, an alarm, a call).
 // Without the interruption observer the AudioUnits stayed "started" while iOS no longer called them, and a game waiting for its buffers back lost its sound until restart.
@@ -521,6 +606,13 @@ static void front_ios_audio_watch(void) {
             if (!g_audio_bg) front_ios_audio_session();
         }
         front_ios_audio_apply();
+    }];
+    // A new output (an HDMI adapter, AirPods, a dock) or one gone: ask for the channels the new route takes, then the host gives each output a unit at that count (dm_audio_route_changed)
+    [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
+        NSUInteger reason = [n.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+        if (reason == AVAudioSessionRouteChangeReasonCategoryChange) return;   // our own setCategory at activation; the route is the same
+        LOG("audio session: route changed (reason %lu)", (unsigned long)reason);
+        front_ios_audio_channels(AVAudioSession.sharedInstance); dm_audio_route_changed();
     }];
     [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         (void)n; LOG("audio session: the media services were reset; setting the session and the outputs up again");
@@ -545,13 +637,210 @@ static void save_sync_background(void) {
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
-        case 0: dm_gamepad_reset(); dm_focus_set(2); break;
+        case 0: quit_close(); dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); break;
         case 1: UIApplication.sharedApplication.idleTimerDisabled = NO; dm_focus_set(3); g_audio_bg = 1; front_ios_audio_apply(); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); save_sync_background(); break;
         case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); g_audio_bg = 0; front_ios_audio_apply(); dm_focus_set(2); break;
         case 3:   // Becoming active again also ends an interruption whose "ended" never came (not every one sends it), and retries a session that would not activate on the way back
             UIApplication.sharedApplication.idleTimerDisabled = YES;
             if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
             if (g_session_off) front_ios_audio_session();
-            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); break;
+            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_movie_active(1); break;
     }
+}
+
+// ---- Quit to the launcher (LNPANDY/NX2Apple#421) ----
+// Two ways open the quit prompt (quit_prompt.h) over the game: Quit at the end of the in-game menu (the gear at the top centre, GameMenu.swift, which stays while
+// a controller hides the other touch controls), and holding a controller's Home button for 2 seconds (home_quit.h, as on the Mac; the indicator at the top fills
+// while it is held). A tap on Quit or A quits, a tap on Cancel or outside the card, B or a new press of Home closes it. While it is open the game is told it lost
+// the focus, as the Switch's HOME menu does, and gets no touch or controller input.
+// Quitting ends the process: one game runs per process (dm_profile() and the host's early loading run once, the shell's ShellMain.m), so the engine cannot hand
+// the window back to a launcher and start another game. It goes the way of a SIGTERM (dm_host_shutdown: audio and graphics stopped, in-flight GPU work drained,
+// _exit(0)), after the cloud saves have gone out as they do when the app goes to the background. What the game saved is on disk already (hle_fs.c writes each
+// commit), progress it did not save is lost, as the prompt says. iOS has no way for an app to start itself again: the player opens it from the Home Screen.
+// DM_HOME_QUIT=0 turns the Home hold off. DM_HOME_QUIT_TEXT carries the texts in the player's language, one per line (home_quit.h's order), English otherwise.
+@interface DmQuitView : UIView
+@property (nonatomic) qp_layout layout;
+@property (nonatomic, strong) CALayer *prompt, *actions;
+@property (nonatomic) int down;          // what the touch went down on (QP_HIT_*); a tap counts when it is released on the same thing
+@property (nonatomic) double opened;     // a touch in the first moments after the prompt opened is not taken: a second tap meant for the menu or the game
+@end
+static home_quit g_hq; static int g_hq_on = -1, g_hq_busy;
+static char g_hq_text[HQ_TEXTS][256];
+static DmQuitView *g_hq_view; static CALayer *g_hq_hold; static CAShapeLayer *g_hq_ring; static NSTimer *g_hq_timer;
+static void quit_changed(hq_phase was, hq_phase now, GCController *holder);
+static void quit_touch(int hit);
+void front_ios_quit_poll(void);
+
+@implementation DmQuitView
+- (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    self.down = CACurrentMediaTime() - self.opened < 0.25 ? -1 : qp_hit(&_layout, [ts.anyObject locationInView:self]);
+    [self press:self.down == QP_HIT_QUIT ? 0 : self.down == QP_HIT_CANCEL ? 1 : -1];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
+    int hit = qp_hit(&_layout, [ts.anyObject locationInView:self]), down = self.down;
+    [self press:-1]; self.down = -1;
+    if (down >= 0 && hit == down && hit != QP_HIT_NONE) quit_touch(hit);
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self press:-1]; self.down = -1; }
+- (void)press:(int)i {   // a pill held down dims a little, as a button does
+    NSArray<CALayer *> *pills = self.actions.sublayers;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    for (NSUInteger k = 0; k < pills.count; k++) pills[k].opacity = (int)k == i ? 0.7 : 1;
+    [CATransaction commit];
+}
+- (BOOL)isAccessibilityElement { return NO; }
+@end
+
+static NSString *quit_text(int i) { return @(g_hq_text[i]); }
+static void quit_start(void) {
+    if (g_hq_on >= 0) return;
+    g_hq_on = hq_enabled(getenv("DM_HOME_QUIT"));
+    char title[256]; snprintf(title, sizeof title, "Quit %s?", DM_GAME_NAME);
+    const char *def[HQ_TEXTS] = {"Keep holding to quit", title, "Unsaved progress will be lost. The app closes.", "Quit", "Cancel"};
+    const char *text = getenv("DM_HOME_QUIT_TEXT");   // the launcher's, in the player's language: one line per text, in home_quit.h's order
+    for (int i = 0; i < HQ_TEXTS; i++) hq_text_line(text, i, def[i], g_hq_text[i], sizeof g_hq_text[i]);
+    LOG("front end: hold the Home button to quit %s", g_hq_on ? "is on" : "is off (DM_HOME_QUIT=0)");
+}
+static void quit_buttons(int *home, int *a, int *b, GCController *__strong *holder) {
+    *home = *a = *b = 0;
+    for (GCController *c in GCController.controllers) {
+        GCExtendedGamepad *g = c.extendedGamepad; if (!g) continue;
+        if (g.buttonHome.isPressed) { *home = 1; if (!*holder) *holder = c; }
+        *a |= g.buttonA.isPressed; *b |= g.buttonB.isPressed;
+    }
+}
+static void quit_hide_hold(void) { [g_hq_timer invalidate]; g_hq_timer = nil; [g_hq_hold removeFromSuperlayer]; g_hq_hold = nil; g_hq_ring = nil; }
+static void quit_hide_prompt(void) {
+    DmQuitView *v = g_hq_view; g_hq_view = nil; if (!v) return;
+    [UIView animateWithDuration:0.18 animations:^{ v.alpha = 0; } completion:^(BOOL done) { (void)done; [v removeFromSuperview]; }];
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, nil);
+}
+static UIImage *quit_glyph(NSString *symbol, NSString *fallback) {
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:48 weight:UIImageSymbolWeightMedium];
+    return [UIImage systemImageNamed:symbol ?: fallback withConfiguration:cfg] ?: [UIImage systemImageNamed:fallback withConfiguration:cfg];
+}
+static void quit_show_prompt(GCController *holder) {
+    UIView *root = g_root.view; if (!root) return;
+    GCController *pad = holder; if (!pad) for (GCController *c in GCController.controllers) if (c.extendedGamepad) { pad = c; break; }
+    GCExtendedGamepad *g = pad.extendedGamepad;   // with a controller the pills show its own A and B, with touch alone the words only
+    DmQuitView *v = [[DmQuitView alloc] initWithFrame:root.bounds];
+    v.multipleTouchEnabled = NO; v.down = -1; v.opened = CACurrentMediaTime();
+    v.layout = qp_layout_make(root.bounds.size, quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE), quit_text(HQ_TEXT_QUIT), quit_text(HQ_TEXT_CANCEL), g != nil);
+    UIImage *ga = g ? quit_glyph(g.buttonA.sfSymbolsName, @"a.circle") : nil, *gb = g ? quit_glyph(g.buttonB.sfSymbolsName, @"b.circle") : nil;
+    CALayer *actions = nil; qp_layout l = v.layout;
+    v.prompt = qp_prompt_layer(root.bounds, &l, quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE), quit_text(HQ_TEXT_QUIT), quit_text(HQ_TEXT_CANCEL),
+                               ga.CGImage, gb.CGImage, MAX(root.traitCollection.displayScale, 1), &actions);
+    v.actions = actions;
+    [v.layer addSublayer:v.prompt];
+    // VoiceOver reads the title and the note and offers the two actions
+    UIAccessibilityElement *(^element)(NSString *, CGRect, UIAccessibilityTraits) = ^(NSString *label, CGRect frame, UIAccessibilityTraits traits) {
+        UIAccessibilityElement *x = [[UIAccessibilityElement alloc] initWithAccessibilityContainer:v];
+        x.accessibilityLabel = label; x.accessibilityFrameInContainerSpace = frame; x.accessibilityTraits = traits; return x;
+    };
+    v.accessibilityElements = @[element([NSString stringWithFormat:@"%@ %@", quit_text(HQ_TEXT_TITLE), quit_text(HQ_TEXT_NOTE)], l.card, UIAccessibilityTraitHeader),
+                                element(quit_text(HQ_TEXT_QUIT), l.quit, UIAccessibilityTraitButton), element(quit_text(HQ_TEXT_CANCEL), l.cancel, UIAccessibilityTraitButton)];
+    v.alpha = 0; [root addSubview:v];
+    [UIView animateWithDuration:0.18 animations:^{ v.alpha = 1; }];
+    g_hq_view = v;
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, v.accessibilityElements.firstObject);
+}
+// The prompt's quit: the cloud saves go out (as when the app goes to the background), then the host ends as on a SIGTERM. Off the main queue: both wait
+static void quit_now(void) {
+    LOG("front end: quit from the quit prompt, the app closes (one game per process)");
+    g_hq_view.userInteractionEnabled = NO;
+    [CATransaction begin]; [CATransaction setAnimationDuration:0.2]; g_hq_view.actions.opacity = 0.4; [CATransaction commit];
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (!save_sync_flush(8000)) LOG("front end: the save did not reach the cloud before quitting, it goes at the next start");
+        dm_host_shutdown("the quit prompt");
+    });
+}
+static void quit_changed(hq_phase was, hq_phase now, GCController *holder) {
+    if (was == HQ_HOLDING) quit_hide_hold();
+    switch (now) {
+    case HQ_HOLDING:
+        g_hq_timer = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *t) { (void)t; front_ios_quit_poll(); }];
+        break;
+    case HQ_PROMPT:
+        dm_gamepad_reset();   // nothing the touch gamepad or a controller held stays pressed while the prompt is open
+        dm_focus_set(2);
+        quit_show_prompt(holder);
+        LOG("front end: quit prompt open (%s)", holder ? "Home held" : "the in-game menu");
+        break;
+    case HQ_SETTLE:
+        quit_hide_prompt(); dm_focus_set(1);
+        LOG("front end: quit prompt closed, the game goes on");
+        break;
+    case HQ_IDLE:
+        if (was == HQ_SETTLE) dm_gamepad_pads_read();   // the game reads the controllers again, as they are now
+        break;
+    case HQ_QUIT:
+        quit_now();
+        break;
+    }
+}
+void front_ios_quit_poll(void) {   // DmGamepad.m on a controller's change, and the hold's timer (main queue)
+    quit_start();
+    if (!g_hq_on || !g_root.game || g_hq_busy) return;
+    g_hq_busy = 1;
+    int home, a, b; GCController *holder = nil; quit_buttons(&home, &a, &b, &holder);
+    double now = CACurrentMediaTime();
+    hq_phase was = g_hq.phase, ph = hq_step(&g_hq, now, home, a, b);
+    if (ph != was) quit_changed(was, ph, holder);
+    double fill = hq_ring(&g_hq, now);
+    if (fill >= 0) {
+        if (!g_hq_hold) {
+            CAShapeLayer *ring = nil; UIView *root = g_root.view;
+            g_hq_hold = qp_hold_layer(root.bounds, quit_text(HQ_TEXT_HOLD), MAX(root.traitCollection.displayScale, 1), &ring); g_hq_ring = ring;
+            [root.layer addSublayer:g_hq_hold];
+        }
+        qp_hold_set(g_hq_ring, fill);
+    }
+    g_hq_busy = 0;
+}
+static void quit_open(void) {   // the in-game menu's Quit
+    quit_start();
+    if (!g_root.game) return;
+    int home, a, b; GCController *holder = nil; quit_buttons(&home, &a, &b, &holder);
+    hq_phase was = g_hq.phase;
+    if (hq_touch_open(&g_hq, home, a, b) != was) quit_changed(was, HQ_PROMPT, nil);
+}
+static void quit_touch(int hit) {   // DmQuitView: a tap on Quit, on Cancel or outside the card
+    hq_phase was = g_hq.phase, now = hit == QP_HIT_QUIT ? hq_touch_quit(&g_hq) : hq_touch_cancel(&g_hq);
+    if (now == was) return;
+    quit_changed(was, now, nil);
+    if (now == HQ_SETTLE) front_ios_quit_poll();   // with every button up the game has its input again at once
+}
+int front_ios_quit_blocks_input(void) { return hq_blocks_input(g_hq.phase); }
+static void quit_close(void) {   // the app is leaving the foreground: whatever is shown closes, a Home still held needs a new press
+    if (g_hq.phase == HQ_IDLE || g_hq.phase == HQ_QUIT) return;
+    if (g_hq.phase == HQ_PROMPT || g_hq.phase == HQ_SETTLE) LOG("front end: quit prompt closed, the app left the foreground");
+    hq_cancel(&g_hq); quit_hide_hold(); quit_hide_prompt();
+}
+// The in-game menu's last item: "Quit <game>" (the prompt's title without its question mark), destructive, opening the prompt. A retained UIMenu (DmGameMenu.h)
+void *dm_quit_menu(void) {
+    quit_start();
+    NSString *title = [quit_text(HQ_TEXT_TITLE) stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"?？  "]];
+    UIAction *quit = [UIAction actionWithTitle:title image:[UIImage systemImageNamed:@"xmark.circle"] identifier:nil handler:^(UIAction *a) { (void)a; quit_open(); }];
+    quit.attributes = UIMenuElementAttributesDestructive;
+    return (void *)CFBridgingRetain([UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[quit]]);
+}
+// The Home button setting for apps, once, when the first controller is there (GameController reads it only while one is connected): the Home hold works when
+// the app decides ("app"). Either way the in-game menu's Quit stays, as the gear stays with a controller
+void front_ios_quit_controllers(void) {
+    quit_start();
+#if defined(__IPHONE_27_0)
+    if (@available(iOS 27.0, *)) {
+        static int done; if (done || !g_hq_on) return;
+        int any = 0; for (GCController *c in GCController.controllers) if (c.extendedGamepad) any = 1;
+        if (!any) return;
+        done = 1;
+        GCControllerHomeButtonSettingCustomizationStatus by = GCControllerHomeButtonSettingCustomizationDefault; NSError *err = nil;
+        GCControllerHomeButtonSettingInAppAction v = [[GCControllerHomeButtonSettingsManager new] readControllerHomeButtonInAppAction:&by withError:&err];
+        LOG("front end: Home button in apps: %s (%s)%s%s", hq_in_app_name((long)v),
+            by == GCControllerHomeButtonSettingCustomizationUser ? "set by the player" : "the system's default", err ? ", " : "", err ? err.localizedDescription.UTF8String : "");
+        return;
+    }
+#endif
+    static int said; if (!said++) LOG("front end: the Home button setting is read on iOS 27, the Home hold works where the system lets the press through");
 }

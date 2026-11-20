@@ -11,6 +11,9 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
+#include "net_socket.h"
+
+static char g_nextendo_dir[1024];   // Nextendo's patched main, when it is the one loaded (nextendo_main)
 #if TARGET_OS_IPHONE
 #include <mach/mach.h>
 #endif
@@ -210,39 +213,94 @@ static uint64_t resolve_sym(module_t *m, const char *name) {
     return resolve_import(m, name);
 }
 
+static const char k_language_list[] = "_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi";
+static const char k_language_count[] = "_ZN2nn8settings29GetAvailableLanguageCodeCountEv";
+
+// The public list/count exports in these Ounce SDKs only read the SDK's own table. Check the SDK revision and both exports
+// together so an unknown or incomplete SDK keeps both settings-service fallbacks. See docs/reference/services.md.
+static int sdk_has_local_language_list(void) {
+    static const char prefix[] = "FS_ACCESS: { sdk_version: ";
+    static const char *const reviewed[] = {
+        "20.5.19, spec: Ounce }", "20.5.25, spec: Ounce }", "21.4.0, spec: Ounce }",
+        "21.4.1, spec: Ounce }", "22.2.8, spec: Ounce }", "22.2.10, spec: Ounce }",
+    };
+    for (int i = 0; i < g_nmod; i++) {
+        module_t *m = &g_mod[i];
+        if (strcmp(m->name, "sdk") || m->ro_off >= m->data_off || m->data_off > m->size ||
+            !module_sym(m, k_language_list) || !module_sym(m, k_language_count)) continue;
+        const uint8_t *p = m->base + m->ro_off, *end = m->base + m->data_off;
+        while ((p = memmem(p, (size_t)(end - p), prefix, sizeof prefix - 1))) {
+            p += sizeof prefix - 1;
+            for (size_t j = 0; j < sizeof reviewed / sizeof *reviewed; j++) {
+                size_t len = strlen(reviewed[j]);
+                if ((size_t)(end - p) >= len && !memcmp(p, reviewed[j], len)) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static unsigned *g_fidx, g_fmask;   // name hash over the table: force_lookup runs for every named relocation, and each lookup used to strcmp its way through all 722 entries (the swhle table's scan is hashed the same way, hle.c)
+static const unsigned k_force_disabled = UINT_MAX;
 static void force_init(void) {
     unsigned long sz; g_force = (const hle_force_ent *)getsectiondata(&_mh_execute_header, "__DATA", "swforce", &sz);
     g_nforce = g_force ? (unsigned)(sz / sizeof *g_force) : 0;
     g_force_hits = calloc(g_nforce + 1, sizeof *g_force_hits);
     unsigned cap = 16; while (cap < g_nforce * 2) cap <<= 1;
     g_fidx = calloc(cap, sizeof *g_fidx); g_fmask = cap - 1;
-    for (unsigned i = 0; i < g_nforce; i++)   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+    int native_language_list = sdk_has_local_language_list();
+    for (unsigned i = 0; i < g_nforce; i++) {   // insertion doubles as the duplicate check (a wrong list must still fail loudly, at once)
+        if (native_language_list && (!strcmp(g_force[i].name, k_language_list) || !strcmp(g_force[i].name, k_language_count)))
+            g_force_hits[i] = k_force_disabled;
         for (unsigned j = sym_hash(g_force[i].name) & g_fmask;; j = (j + 1) & g_fmask) {
             if (!g_fidx[j]) { g_fidx[j] = i + 1; break; }
             if (!strcmp(g_force[g_fidx[j] - 1].name, g_force[i].name)) die("duplicate entry in the forced takeover list: %s", g_force[i].name);
         }
+    }
+    for (unsigned i = 0; i < g_nforce; i++)   // an alias binds to the guest's definition: a target the host takes over would bypass that take-over
+        if (g_force[i].to)
+            for (unsigned j = sym_hash(g_force[i].to) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask)
+                if (g_force_hits[g_fidx[j] - 1] != k_force_disabled && !strcmp(g_force[g_fidx[j] - 1].name, g_force[i].to))
+                    die("forced alias %s: its target %s is itself taken over", g_force[i].name, g_force[i].to);
 }
 static void *force_lookup(const char *name) {
     if (!g_fmask) return NULL;
     for (unsigned j = sym_hash(name) & g_fmask; g_fidx[j]; j = (j + 1) & g_fmask) {
         unsigned i = g_fidx[j] - 1;
         if (!strcmp(g_force[i].name, name)) {
+            if (g_force_hits[i] == k_force_disabled) return NULL;   // let normal guest symbol resolution bind it
+            if (g_force[i].to) {   // a guest alias (hle.h HLE_FORCE_ALIAS); the caller holds g_modules_mu or is relocating at startup, as for resolve_sym
+                void *p = loaded_sym(g_force[i].to);
+                if (!g_force_hits[i]++) {
+                    if (!p) LOG("[RED] forced alias %s: no loaded module defines %s; bound without the alias", name, g_force[i].to);
+                    else if (g_flag.imports) LOG("force %s -> %s  (%s)", name, g_force[i].to, g_force[i].why);
+                }
+                void *hlecount_wrap(const char *, const char *, void *); return p ? hlecount_wrap("ALIAS", name, p) : NULL;
+            }
             if (!g_force_hits[i]++ && g_flag.imports) LOG("force %s  (%s)", name, g_force[i].why);
             void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // A counting stub when DM_HLECOUNT is set
         }
     }
     return NULL;
 }
+// Validate the complete linked production table without loading game data,
+// creating a window or reading credentials. Component-only fixtures cannot
+// detect duplicate hooks registered in a different translation unit.
+void dm_validate_hle_registry(void) {
+    if (!g_fmask) force_init();
+    (void)hle_implements("__dm_registry_validation__");
+    LOG("HLE registry validated: %u unique forced takeovers",g_nforce);
+}
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
-    unsigned unused = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
+    unsigned unused = 0, disabled = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
     for (unsigned i = 0; i < g_nforce; i++)
-        if (!g_force_hits[i]) { if (strict || g_flag.imports) LOG("forced takeover entry with no reference at all: %s", g_force[i].name); unused++; }
+        if (g_force_hits[i] == k_force_disabled) disabled++;
+        else if (!g_force_hits[i]) { if (strict || g_flag.imports) LOG("forced takeover entry with no reference at all: %s", g_force[i].name); unused++; }
     if (unused && strict) die("forced takeover list is wrong");
-    LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused, unused);
+    LOG("force: %u entries hit, %u not referenced by this game", g_nforce - unused - disabled, unused);
 }
 
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
@@ -266,11 +324,14 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
+        else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
         else if (!strcmp(key, "UE_MALLOC_SLOT")) m->ue_malloc_slot = (unsigned)v;
         else if (!strcmp(key, "FPS_TARGET_PTR")) m->fps_target_ptr = v;
         else if (!strcmp(key, "FPS_TARGET_FIELD")) m->fps_target_field = (uint32_t)v;
+        else if (!strcmp(key, "MONOLITH_INTERVAL")) m->monolith_interval = v;
+        else if (!strcmp(key, "NATIVE_FPS_BLOCKED")) m->native_fps_blocked = v != 0;
         else if (!strcmp(key, "UE_FIXED_RATE_PTR")) m->ue_fixed_ptr = v;
         else if (!strcmp(key, "UE_FIXED_RATE_FIELD")) m->ue_fixed_field = (uint32_t)v;
         else if (!strcmp(key, "UE_FIXED_RATE_FLAG")) m->ue_fixed_flag = (uint32_t)v;
@@ -754,6 +815,8 @@ void dm_set_game_image_header(const void *mh) { g_game_image = mh; }
 typedef struct { char name[32]; uint64_t off[3][2]; } nro_ent;
 // DM_EMBED_TAG (main.m, an app holding several programs of one game): the running program's sections are tagged (gen_embed.py --tag: __dm<tag><name>x0, …, __dm<tag>_nro_x0)
 static const char *embed_tag(void) { const char *t = getenv("DM_EMBED_TAG"); return t ? t : ""; }
+// The embedded module's name: Nextendo's patched main is nmain (gen_embed.py, nextendo_main)
+static const char *embed_name(const module_t *m) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? "nmain" : m->name; }
 static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, const uint8_t **w, unsigned long *zw, const uint8_t **x1, unsigned long *z1) {
     unsigned long zt, s0, sw, s1;
     char st[17], s0n[17], swn[17], s1n[17]; const char *g = embed_tag();
@@ -769,8 +832,8 @@ static int nro_pieces(const char *name, const uint8_t **x0, unsigned long *z0, c
 }
 static void map_image(module_t *m, const char *dir) {
     (void)dir;
-    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag();
-    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, m->name); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, m->name); snprintf(dm, sizeof dm, "__DM%s%sW", g, m->name);
+    char sx0[17], sx1[17], dm[17]; const char *g = embed_tag(), *nm = embed_name(m);
+    snprintf(sx0, sizeof sx0, "__dm%s%sx0", g, nm); snprintf(sx1, sizeof sx1, "__dm%s%sx1", g, nm); snprintf(dm, sizeof dm, "__DM%s%sW", g, nm);
     unsigned long z0 = 0, zw = 0, z1 = 0;
     const uint8_t *x0 = NULL, *w = NULL, *x1 = NULL;
     if (m->nro) { if (!nro_pieces(m->name, &x0, &z0, &w, &zw, &x1, &z1)) die("NRO %s: not in the embedded NRO table (__DATA,__dm_nro_tab)", m->name); }
@@ -779,7 +842,7 @@ static void map_image(module_t *m, const char *dir) {
     // The back patch area (patch_nso.py TWO) is a fourth section, __dm<name>x2; NROs never have one (nro_pieces holds three pieces)
     unsigned long z2 = 0; const uint8_t *x2 = NULL;
     if (m->back_len) {
-        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, m->name);
+        char sx2[17]; snprintf(sx2, sizeof sx2, "__dm%s%sx2", g, nm);
         if (m->nro || !(x2 = getsectiondata(IMAGE_MH, "__TEXT", sx2, &z2)) || z2 != m->back_len || ((uintptr_t)x2 & 0x3FFF)) die("embedded back patch area %s missing or wrong", sx2);
     }
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
@@ -851,8 +914,29 @@ static void map_image(module_t *m, const char *dir) {
 static char g_module_dir[1024];   // the folder the modules were loaded from (dm_module_dir)
 const char *dm_module_dir(void) { return g_module_dir; }
 
+// A --nextendo build (scripts/build_ipa_from_nsp.py nextendo_build) rewrites a copy of main with Nextendo's signed game patch into <dir>/nextendo. With Nextendo on
+// (net_socket.h dm_net_nextendo_enabled), main comes from there; offline, LAN and LDN keep the original. On the iPhone, <dir>/nextendo holds the copy's tables and its
+// code is embedded as module nmain (gen_embed.py; g_nextendo_dir, map_image)
+static const char *module_dir(const module_t *m, const char *dir) { return g_nextendo_dir[0] && !strcmp(m->name, "main") ? g_nextendo_dir : dir; }
+// A Nextendo session starts with the game: the account's Mii (hle_nextendo_social_apple.m has the strong definition; other hosts have none)
+__attribute__((weak)) void dm_nextendo_session_start(void) {}
+static void nextendo_main(const char *dir) {
+    g_nextendo_dir[0] = 0;
+    if (!dm_net_nextendo_enabled()) return;
+    dm_nextendo_session_start();
+    char path[1100]; struct stat st;
+    if ((size_t)snprintf(g_nextendo_dir, sizeof g_nextendo_dir, "%s/nextendo", dir) >= sizeof g_nextendo_dir) die("Nextendo: module folder path too long: %s", dir);
+    snprintf(path, sizeof path, "%s/main.fixups.tsv", g_nextendo_dir);
+    if (lstat(path, &st) || !S_ISREG(st.st_mode)) {
+        LOG("Nextendo: no patched main in %s (the build had no --nextendo, or Nextendo publishes no patch for this build): the original main runs online", g_nextendo_dir);
+        g_nextendo_dir[0] = 0; return;
+    }
+    LOG("Nextendo: main from %s (Nextendo's signed game patch)", g_nextendo_dir);
+}
+
 void load_modules(const char *dir, const char **names, int n) {
     strlcpy(g_module_dir, dir, sizeof g_module_dir);
+    nextendo_main(dir);
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
@@ -861,16 +945,16 @@ void load_modules(const char *dir, const char **names, int n) {
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
         strlcpy(m->name, names[i], sizeof m->name);
-        read_layout(m, dir);
+        read_layout(m, module_dir(m, dir));
     }
     create_keys();
     jit_layout_init();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, module_dir(m, dir)); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
-        t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
+        t = now_ns(); register_gates(m, module_dir(m, dir)); tg += now_ns() - t;
         LOG("%s: base %p size %#zx", names[i], m->base, m->size);
         m->loaded = 1; g_loaded[g_nloaded++] = m; g_nmod++;
     }

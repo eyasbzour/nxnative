@@ -47,6 +47,78 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
 @end
 
+@interface DuoFakeTouchEvent : UIEvent
+@end
+
+@implementation DuoFakeTouchEvent
+- (UIEventType)type { return UIEventTypeTouches; }
+@end
+
+@interface DuoLiveButton : NSObject
+@property (nonatomic, getter=isPressed) BOOL pressed;
+- (DuoLiveButton *)pressedInput;
+@end
+@implementation DuoLiveButton
+- (DuoLiveButton *)pressedInput { return self; }
+@end
+
+typedef void (^DuoLiveHandler)(id<GCDevicePhysicalInput>, id<GCPhysicalInputElement>);
+
+// Live profiles cannot be constructed through GameController's public snapshot API.
+@interface DuoLiveInput : NSObject
+@property (nonatomic, copy) DuoLiveHandler elementValueDidChangeHandler;
+@property (nonatomic, copy) NSDictionary<NSString *, DuoLiveButton *> *buttons;
+@property (nonatomic, copy) NSDictionary<NSString *, GCControllerDirectionPad *> *dpads;
+- (void)setPressed:(BOOL)pressed button:(NSString *)name;
+- (void)moveX:(float)x y:(float)y;
+@end
+@implementation DuoLiveInput
+- (instancetype)init {
+    if ((self = [super init])) {
+        NSMutableDictionary *buttons = [NSMutableDictionary dictionary];
+        for (NSString *name in @[GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY,
+                                 GCInputLeftShoulder, GCInputRightShoulder, GCInputButtonMenu, GCInputButtonHome])
+            buttons[name] = [DuoLiveButton new];
+        _buttons = [buttons copy];
+        _dpads = @{ GCInputDirectionPad: [GCController controllerWithExtendedGamepad].extendedGamepad.dpad };
+    }
+    return self;
+}
+- (void)setPressed:(BOOL)pressed button:(NSString *)name {
+    DuoLiveButton *button = self.buttons[name];
+    button.pressed = pressed;
+    DuoLiveHandler handler = self.elementValueDidChangeHandler;
+    if (handler) handler((id)self, (id)button);
+}
+- (void)moveX:(float)x y:(float)y {
+    GCControllerDirectionPad *stick = self.dpads[GCInputDirectionPad];
+    [stick setValueForXAxis:x yAxis:y];
+    DuoLiveHandler handler = self.elementValueDidChangeHandler;
+    if (handler) handler((id)self, (id)stick);
+}
+@end
+
+@interface DuoLiveController : NSObject
+@property (nonatomic, copy) NSString *productCategory;
+@property (nonatomic, readonly) NSString *vendorName;
+@property (nonatomic, readonly) GCExtendedGamepad *extendedGamepad;
+@property (nonatomic, readonly) GCMotion *motion;
+@property (nonatomic, readonly) DuoLiveInput *input;
+- (instancetype)initWithCategory:(NSString *)category;
+@end
+@implementation DuoLiveController
+- (instancetype)initWithCategory:(NSString *)category {
+    if ((self = [super init])) {
+        _productCategory = [category copy];
+        _input = [DuoLiveInput new];
+    }
+    return self;
+}
+- (NSString *)vendorName { return self.productCategory; }
+- (GCExtendedGamepad *)extendedGamepad { return nil; }
+- (GCMotion *)motion { return nil; }
+@end
+
 #if DUO_HARNESS_HAS_NATIVE_POSE_API
 @interface DuoFakeHinge : NSObject
 @property (nonatomic) NSInteger status;
@@ -103,6 +175,35 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 #endif
 
+@interface UIView (DuoHarnessGamepadMenu)
+- (void)setMenuOpen:(BOOL)open;
+- (BOOL)webTouchActive;
+- (BOOL)voiceOverRunning;
+- (BOOL)reduceMotionEnabled;
+- (BOOL)duo_harness_webTouchActive;
+- (BOOL)duo_harness_voiceOverRunning;
+- (BOOL)duo_harness_reduceMotionEnabled;
+@end
+
+static BOOL gDuoHarnessWebTouchActive;
+static BOOL gDuoHarnessVoiceOverRunning;
+static BOOL gDuoHarnessReduceMotionEnabled;
+
+@implementation UIView (DuoHarnessGamepadMenu)
+- (BOOL)duo_harness_webTouchActive {
+    if (gDuoHarnessWebTouchActive) return YES;
+    return [self duo_harness_webTouchActive];
+}
+- (BOOL)duo_harness_voiceOverRunning {
+    if (gDuoHarnessVoiceOverRunning) return YES;
+    return [self duo_harness_voiceOverRunning];
+}
+- (BOOL)duo_harness_reduceMotionEnabled {
+    if (gDuoHarnessReduceMotionEnabled) return YES;
+    return [self duo_harness_reduceMotionEnabled];
+}
+@end
+
 @interface DuoHarnessTests : XCTestCase
 @property (nonatomic, strong) id savedLayout;
 @property (nonatomic) BOOL controllerListOverridden;
@@ -123,6 +224,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
 
 - (void)tearDown {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults removeObjectForKey:@"DmPadSplit"]; [defaults removeObjectForKey:@"DmPadLabels"];
+    dm_gamepad_view(CGRectMake(0, 0, 10, 10));   // a new pad reads the saved split again: the next test starts with the diamond whole
     if (self.savedLayout) [defaults setObject:self.savedLayout forKey:@"DmPadLayout"];
     else [defaults removeObjectForKey:@"DmPadLayout"];
     if (self.controllerListOverridden) {
@@ -395,6 +498,85 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(input.touch_count, 0);
 }
 
+- (void)testControlsSizeScalesTheBottomControlsAndKeepsTheRestInPlace {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    CGFloat u = MIN(bounds.size.height / 430.0, 1.3);
+    CGPoint zl = [self controlCenterNamed:@"ZL" inPad:pad];
+    for (NSString *size in @[@"1.35", @"0.75", @"1.0"]) {
+        CGFloat bu = u * size.doubleValue;
+        dm_gamepad_scale(size.UTF8String); [pad layoutIfNeeded];
+        CGRect ring = [self largestShapePathBoundsInLayer:pad.layer];
+        XCTAssertEqualWithAccuracy(ring.size.width, 2 * 77 * bu, 0.5, @"%@", size);
+        XCTAssertEqualWithAccuracy(CGRectGetMidX(ring), 81 * bu, 0.5);
+        XCTAssertEqualWithAccuracy(CGRectGetMidY(ring), bounds.size.height - 82 * bu, 0.5);
+        CGPoint faces = [self faceDiamondCenterInPad:pad];
+        XCTAssertEqualWithAccuracy(faces.x, bounds.size.width - 81 * bu, 0.5);
+        XCTAssertEqualWithAccuracy(faces.y, bounds.size.height - 82 * bu, 0.5);
+        XCTAssertEqualWithAccuracy([self controlPathBoundsNamed:@"A" inPad:pad].size.width, 2 * 27 * bu, 0.5);
+        CGPoint dpad = CGPointMake(231 * bu, bounds.size.height - 64 * bu);
+        [self assertButton:DM_BTN_RIGHT at:CGPointMake(dpad.x + 0.6 * 48 * bu, dpad.y) onPad:pad time:1];
+        CGPoint z = [self controlCenterNamed:@"ZL" inPad:pad];
+        XCTAssertTrue(CGPointEqualToPoint(z, zl), @"The shoulder keys keep their size and place");
+    }
+    dm_gamepad_scale("9"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u * 1.35, 0.5, @"A size above the range stops at 135 %%");
+    dm_gamepad_scale("0"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u * 0.75, 0.5, @"0 stops at 75 %%");
+    dm_gamepad_scale("0.1"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u * 0.75, 0.5, @"and one below it at 75 %%");
+    dm_gamepad_scale("none"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, 2 * 77 * u, 0.5, @"A value that is no number is the default size");
+}
+
+- (void)testSmallestControlsSizeKeepsFaceTouchCirclesAt44Points {
+    // 667 x 375: the smallest phone iOS 26 runs on (iPhone SE, 2nd and 3rd generation), where the circle is 44 points as it stands; 568 x 320: smaller than any such phone, so that the 22 point floor is what decides
+    for (NSValue *v in @[[NSValue valueWithCGRect:CGRectMake(0, 0, 667, 375)], [NSValue valueWithCGRect:CGRectMake(0, 0, 568, 320)]]) {
+        CGRect bounds = v.CGRectValue;
+        UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+        dm_gamepad_scale("0.75"); [pad layoutIfNeeded];
+        XCTAssertLessThan([self controlPathBoundsNamed:@"A" inPad:pad].size.width, 44);
+        const uint64_t faceBits[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y};
+        const CGPoint faceOffsets[] = {{21.5, 0}, {0, 21.5}, {0, -21.5}, {-21.5, 0}};   // outward, clear of the neighbouring keys
+        NSArray<NSString *> *faces = @[@"A", @"B", @"X", @"Y"];
+        for (NSUInteger i = 0; i < faces.count; i++) {
+            CGPoint c = [self controlCenterNamed:faces[i] inPad:pad];
+            [self assertButton:faceBits[i] at:CGPointMake(c.x + faceOffsets[i].x, c.y + faceOffsets[i].y) onPad:pad time:40 + i];
+        }
+    }
+}
+
+- (void)testControlsOpacityDimsEveryControlAndTheMenuButton {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    UIView *pad = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    CALayer *controls = pad.layer.sublayers.firstObject;
+    XCTAssertGreaterThan(controls.sublayers.count, 16u);
+    UIButton *menu = [self menuButtonInPad:pad];
+    for (NSString *value in @[@"0.5", @"0.05", @"0", @"-2", @"7", @"none", @"0.5x"]) {
+        dm_gamepad_opacity(value.UTF8String);
+        float want = [value isEqual:@"0.5"] ? 0.5f : [@[@"0.05", @"0", @"-2"] containsObject:value] ? 0.3f : 1.f;   // any number below the range, 0 and negatives included: 30 %; above it or no number (also "0.5x"): as drawn
+        for (CALayer *l in controls.sublayers) XCTAssertEqualWithAccuracy(l.opacity, want, 1e-6, @"%@", value);
+        XCTAssertEqualWithAccuracy(menu.alpha, want, 1e-6);
+    }
+    dm_gamepad_opacity("0.5");
+    UIView *fresh = [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    XCTAssertEqualWithAccuracy(((CALayer *)fresh.layer.sublayers.firstObject).sublayers.firstObject.opacity, 1.f, 1e-6, @"A new pad takes its opacity from the environment, not from the last one");
+}
+
+- (void)testControlsSizeAtItsLargestStaysInsideASeparatedRegion {
+    for (NSValue *v in @[[NSValue valueWithCGRect:CGRectMake(0, 0, 390, 844)], [NSValue valueWithCGRect:CGRectMake(0, 0, 320, 568)]]) {
+        CGRect bounds = v.CGRectValue;
+        DmLayout layout = [self separatedLayout:bounds];
+        XCTAssertTrue(layout.separated);
+        UIView *pad = [self padForLayout:layout bounds:bounds];
+        dm_gamepad_scale("1.35"); [pad layoutIfNeeded];
+        XCTAssertTrue(CGRectContainsRect(layout.controls, [self largestShapePathBoundsInLayer:pad.layer]), @"The left stick stays in the controls' region at %@", NSStringFromCGRect(bounds));
+        for (NSString *name in @[@"A", @"B", @"X", @"Y"]) {
+            XCTAssertTrue(CGRectContainsRect(layout.controls, [self controlPathBoundsNamed:name inPad:pad]), @"%@ stays in the controls' region at %@", name, NSStringFromCGRect(bounds));
+        }
+    }
+}
+
 - (void)testPictureFillCoversTheLandscapeViewWithoutStretching {
     XCTAssertTrue(dm_picture_fill("fill"));
     XCTAssertFalse(dm_picture_fill("fit"));
@@ -613,6 +795,47 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     XCTAssertEqual(duo_harness_input().buttons, 0);
 }
 
+- (void)testSplitDiamondKeepsPlacesThenMakesFourIndependentKeys {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    UIView *whole = [self padForLayout:layout bounds:bounds];
+    CGPoint a0 = [self controlCenterNamed:@"A" inPad:whole], b0 = [self controlCenterNamed:@"B" inPad:whole];
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"DmPadSplit"];
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    CGPoint a = [self controlCenterNamed:@"A" inPad:pad], b = [self controlCenterNamed:@"B" inPad:pad];
+    XCTAssertEqualWithAccuracy(a.x, a0.x, 0.5, @"split keys start where the diamond had them"); XCTAssertEqualWithAccuracy(a.y, a0.y, 0.5);
+    XCTAssertEqualWithAccuracy(b.x, b0.x, 0.5); XCTAssertEqualWithAccuracy(b.y, b0.y, 0.5);
+    DuoFakeTouch *touch = [self touchAt:a time:1];
+    [self beginTouches:@[touch] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A);
+    [self moveTouch:touch to:CGPointMake((a.x + b.x) / 2, (a.y + b.y) / 2) onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A, @"split keys do not slide: the touch stays on the key it began on");
+    [self moveTouch:touch to:b onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A);
+    [self endTouches:@[touch] onPad:pad cancelled:NO];
+    XCTAssertEqual(duo_harness_input().buttons, 0);
+    DuoFakeTouch *ta = [self touchAt:a time:2], *tb = [self touchAt:b time:3];
+    [self beginTouches:@[ta, tb] onPad:pad];
+    XCTAssertEqual(duo_harness_input().buttons, DM_BTN_A | DM_BTN_B, @"two fingers hold two split keys");
+    [self endTouches:@[ta, tb] onPad:pad cancelled:NO];
+}
+
+- (void)testKeyLabelsAreThePlayersOwnTextOrEmoji {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    DmLayout layout = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9);
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    [defaults setObject:@{@"0": @"\U0001F3AE", @"1": @"Go!", @"8": @"\U0001F468\u200D\U0001F469\u200D\U0001F467", @"13": @"Up"} forKey:@"DmPadLabels"];   // A, B, ZL (a family: one emoji), the D-pad's up arm
+    UIView *pad = [self padForLayout:layout bounds:bounds];
+    XCTAssertNotNil([self textLayerNamed:@"\U0001F3AE" inLayer:pad.layer], @"A shows the emoji");
+    XCTAssertNotNil([self textLayerNamed:@"Go!" inLayer:pad.layer]);
+    XCTAssertNotNil([self textLayerNamed:@"\U0001F468\u200D\U0001F469\u200D\U0001F467" inLayer:pad.layer], @"an emoji with joiners counts as one character");
+    XCTAssertNil([self textLayerNamed:@"A" inLayer:pad.layer], @"A's own label is replaced");
+    XCTAssertNotNil([self textLayerNamed:@"X" inLayer:pad.layer], @"a key without a label of the player's keeps its own");
+    [defaults setObject:@{@"0": @"Jump"} forKey:@"DmPadLabels"];   // four characters: not a saved label
+    pad = [self padForLayout:layout bounds:bounds];
+    XCTAssertNotNil([self textLayerNamed:@"A" inLayer:pad.layer], @"a label past the limit is ignored");
+}
+
 - (void)testOverlappingLockedButtonTargetsChooseNearestAndStayLocked {
     CGRect bounds = CGRectMake(0, 0, 390, 844);
     UIView *pad = [self padForLayout:[self separatedLayout:bounds] bounds:bounds];
@@ -696,7 +919,8 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [root.view layoutIfNeeded];
     UIView *game = [root valueForKey:@"game"];
     XCTAssertTrue(dm_setting_live("DM_PICTURE_FIT", NULL) && dm_setting_live("DM_OPMODE", NULL) && dm_setting_live("DM_RUMBLE", NULL)
-                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL));
+                  && dm_setting_live("DM_SHOW_FPS", NULL) && dm_setting_live("DM_TOUCH_HAPTICS", NULL)
+                  && dm_setting_live("DM_CONTROLS_SCALE", NULL) && dm_setting_live("DM_CONTROLS_OPACITY", NULL));
     XCTAssertFalse(dm_setting_live("DM_LANG", NULL), @"A setting the game reads once at start is not offered");
     XCTAssertFalse(dm_setting_live("DM_FPS_TARGET", NULL));
 
@@ -716,6 +940,17 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     UILabel *fps = [root valueForKey:@"fps"];
     XCTAssertNotNil(fps); XCTAssertFalse(fps.hidden);
     dm_setting_live("DM_SHOW_FPS", "0"); XCTAssertTrue(fps.hidden);
+
+    UIView *pad = [root valueForKey:@"pad"];
+    CGFloat ring = [self largestShapePathBoundsInLayer:pad.layer].size.width, gear = ((UIView *)[pad valueForKey:@"menu"]).frame.size.width;
+    dm_setting_live("DM_CONTROLS_SCALE", "1.2"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, ring * 1.2, 0.5, @"Controls size applies at once");
+    XCTAssertEqualWithAccuracy(((UIView *)[pad valueForKey:@"menu"]).frame.size.width, gear * 1.2, 0.5, @"to the top row too (the menu gear)");
+    dm_setting_live("DM_CONTROLS_SCALE", "1.0"); [pad layoutIfNeeded];
+    XCTAssertEqualWithAccuracy([self largestShapePathBoundsInLayer:pad.layer].size.width, ring, 0.5);
+    dm_setting_live("DM_CONTROLS_OPACITY", "0.5");
+    XCTAssertEqualWithAccuracy(((CALayer *)pad.layer.sublayers.firstObject).sublayers.firstObject.opacity, 0.5f, 1e-6, @"and so does Controls opacity");
+    dm_setting_live("DM_CONTROLS_OPACITY", "1.0");
 }
 
 - (void)testGameViewDrawableHonoursAPixelCap {
@@ -1246,6 +1481,106 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     [self endTouches:@[video, button] onPad:pad cancelled:NO];
 }
 
+- (void)testMenuButtonFollowsTheGameViewAndTheController {
+    UIViewController *root = [self harnessRootViewController];
+    UIView *game = [root valueForKey:@"game"], *pad = [root valueForKey:@"pad"];
+    UIButton *menu = [self menuButtonInPad:pad];
+    UIView *tv = [[UIView alloc] initWithFrame:root.view.bounds];
+    GCController *controller = [GCController controllerWithExtendedGamepad];
+    @try {
+        // The TV scene moves the same game view into its own view hierarchy.
+        [tv addSubview:game]; [root.view setNeedsLayout]; [root.view layoutIfNeeded]; [pad layoutIfNeeded];
+        [self waitForView:menu hidden:NO];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"A touch-only player still has the menu on TV");
+        [self setHarnessControllers:@[controller] notification:GCControllerDidConnectNotification];
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu);
+        [self deliverSnapshotChangeFor:controller button:controller.extendedGamepad.buttonB value:1];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A);
+
+        [root.view insertSubview:game atIndex:0]; [root.view setNeedsLayout]; [root.view layoutIfNeeded]; [pad layoutIfNeeded];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu, @"The gear returns even with the controller still connected");
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_A);
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu, @"The gear fades out after idle seconds with a controller connected");
+        DuoFakeTouch *wake = [self touchAt:CGPointMake(CGRectGetMidX(pad.bounds), CGRectGetMidY(pad.bounds)) time:1];
+        [self beginTouches:@[wake] onPad:pad];
+        XCTAssertEqual(duo_harness_input().touch_count, 1, @"The touch that wakes the gear also reaches the game");
+        [self endTouches:@[wake] onPad:pad cancelled:NO];
+        XCTAssertEqual(duo_harness_input().touch_count, 0, @"Ending the wake touch releases the game touch");
+        XCTAssertFalse(menu.hidden, @"Touching the screen wakes the gear while a controller is connected");
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+        UIContextMenuInteraction *menuInteraction = menu.contextMenuInteraction;
+        XCTAssertNotNil(menuInteraction);
+        UIContextMenuConfiguration *menuConfig = [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:nil];
+        [menu contextMenuInteraction:menuInteraction willDisplayMenuForConfiguration:menuConfig animator:nil];
+        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:3.5]];
+        XCTAssertFalse(menu.hidden, @"The gear stays visible while the in-game menu is open");
+        XCTAssertEqualWithAccuracy(menu.alpha, 1.0, 0.01);
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+        [menu contextMenuInteraction:menuInteraction willEndForConfiguration:menuConfig animator:nil];
+        [self waitForView:menu hidden:YES];
+        XCTAssertNotEqual([pad hitTest:menu.center withEvent:nil], menu, @"Closing the in-game menu restarts the idle fade timer");
+
+        Method origWeb = class_getInstanceMethod(pad.class, @selector(webTouchActive));
+        Method swizWeb = class_getInstanceMethod(UIView.class, @selector(duo_harness_webTouchActive));
+        Method origVO = class_getInstanceMethod(pad.class, @selector(voiceOverRunning));
+        Method swizVO = class_getInstanceMethod(UIView.class, @selector(duo_harness_voiceOverRunning));
+        Method origRM = class_getInstanceMethod(pad.class, @selector(reduceMotionEnabled));
+        Method swizRM = class_getInstanceMethod(UIView.class, @selector(duo_harness_reduceMotionEnabled));
+        method_exchangeImplementations(origWeb, swizWeb);
+        method_exchangeImplementations(origVO, swizVO);
+        method_exchangeImplementations(origRM, swizRM);
+        @try {
+            gDuoHarnessWebTouchActive = YES;
+            CGPoint mid = CGPointMake(CGRectGetMidX(pad.bounds), CGRectGetMidY(pad.bounds));
+            XCTAssertNil([pad hitTest:mid withEvent:nil]);
+            XCTAssertTrue(menu.hidden, @"A programmatic nil-event hitTest while web touch is active must not wake the hidden gear");
+            XCTAssertNil([pad hitTest:mid withEvent:[DuoFakeTouchEvent new]]);
+            XCTAssertFalse(menu.hidden, @"A touch-event hitTest passed through to the web view wakes the gear");
+            gDuoHarnessWebTouchActive = NO;
+            [self waitForView:menu hidden:YES];
+
+            gDuoHarnessVoiceOverRunning = YES;
+            [NSNotificationCenter.defaultCenter postNotificationName:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
+            XCTAssertFalse(menu.hidden, @"Enabling VoiceOver wakes the gear immediately");
+            [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:3.5]];
+            XCTAssertFalse(menu.hidden, @"The gear never auto-hides while VoiceOver is running");
+            XCTAssertEqualWithAccuracy(menu.alpha, 1.0, 0.01);
+            gDuoHarnessVoiceOverRunning = NO;
+            [NSNotificationCenter.defaultCenter postNotificationName:UIAccessibilityVoiceOverStatusDidChangeNotification object:nil];
+            [self waitForView:menu hidden:YES];
+
+            gDuoHarnessReduceMotionEnabled = YES;
+            DuoFakeTouch *wakeRM = [self touchAt:mid time:2];
+            [self beginTouches:@[wakeRM] onPad:pad];
+            [self endTouches:@[wakeRM] onPad:pad cancelled:NO];
+            XCTAssertFalse(menu.hidden);
+            [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:3.08]];
+            XCTAssertEqual(menu.layer.animationKeys.count, 0u, @"Reduce Motion skips the 0.3s fade animation");
+            XCTAssertTrue(menu.hidden, @"With Reduce Motion enabled, the gear hides immediately at the 3s timeout");
+            XCTAssertEqualWithAccuracy(menu.alpha, 0.0, 0.01);
+            gDuoHarnessReduceMotionEnabled = NO;
+        } @finally {
+            gDuoHarnessWebTouchActive = NO;
+            gDuoHarnessVoiceOverRunning = NO;
+            gDuoHarnessReduceMotionEnabled = NO;
+            method_exchangeImplementations(origWeb, swizWeb);
+            method_exchangeImplementations(origVO, swizVO);
+            method_exchangeImplementations(origRM, swizRM);
+        }
+
+        [tv addSubview:game]; [root.view setNeedsLayout]; [root.view layoutIfNeeded]; [pad layoutIfNeeded];
+        XCTAssertTrue(menu.hidden, @"The TV can also connect after the controller");
+        [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+        [self waitForView:menu hidden:NO];
+        XCTAssertEqual([pad hitTest:menu.center withEvent:nil], menu);
+    } @finally {
+        [root.view insertSubview:game atIndex:0]; [root.view setNeedsLayout]; [root.view layoutIfNeeded];
+        [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+    }
+}
+
 - (void)testConnectedVirtualControllerKeepsVideoTouchAndMapsPhysicalButtons {
     if (@available(iOS 17.0, *)) {
         [self setHarnessControllers:nil notification:nil];
@@ -1299,6 +1634,104 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     }
 }
 
+
+- (void)testLiveJoyConMapsSidewaysAndKeepsItsOwnPlayer {
+    CGRect bounds = CGRectMake(0, 0, 844, 390);
+    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    DuoLiveController *joy = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    DuoLiveController *remote = [[DuoLiveController alloc] initWithCategory:@"Siri Remote"];
+    [self setHarnessControllers:@[(GCController *)joy, (GCController *)remote] notification:GCControllerDidConnectNotification];
+    XCTAssertEqual(duo_harness_state().connected_players, 1u);
+    XCTAssertNil(remote.input.elementValueDidChangeHandler);
+
+    NSArray *names = @[GCInputButtonX, GCInputButtonA, GCInputButtonY, GCInputButtonB,
+                       GCInputLeftShoulder, GCInputRightShoulder, GCInputButtonMenu];
+    const uint64_t mapped[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_L, DM_BTN_R, DM_BTN_PLUS};
+    for (NSUInteger i = 0; i < names.count; i++) {
+        [joy.input setPressed:YES button:names[i]];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, mapped[i]);
+        [joy.input setPressed:NO button:names[i]];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, 0u);
+    }
+    [joy.input moveX:1 y:-1];
+    DuoHarnessPlayerInput player = duo_harness_state().players[0];
+    XCTAssertEqual(player.lx, 32767);
+    XCTAssertEqual(player.ly, -32767);
+    XCTAssertEqual(player.rx, 0);
+    XCTAssertEqual(player.ry, 0);
+
+    GCController *extended = [GCController controllerWithExtendedGamepad];
+    [self setHarnessControllers:@[extended, (GCController *)joy] notification:GCControllerDidConnectNotification];
+    uint32_t other = duo_harness_state().connected_players & ~1u;
+    XCTAssertEqual(__builtin_popcount(other), 1);
+    if (other) {
+        int slot = __builtin_ctz(other);
+        [self deliverSnapshotChangeFor:extended button:extended.extendedGamepad.buttonB value:1];
+        [joy.input setPressed:YES button:GCInputButtonA];
+        XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_B);
+        XCTAssertEqual(duo_harness_state().players[slot].buttons, DM_BTN_A);
+
+        DuoLiveHandler stale = joy.input.elementValueDidChangeHandler;
+        [self setHarnessControllers:@[extended] notification:GCControllerDidDisconnectNotification];
+        XCTAssertNil(joy.input.elementValueDidChangeHandler);
+        if (stale) stale((id)joy.input, (id)joy.input.buttons[GCInputButtonA]);
+        DuoHarnessState state = duo_harness_state();
+        XCTAssertEqual(state.connected_players, other);
+        XCTAssertEqual(state.players[0].buttons, 0u);
+        XCTAssertEqual(state.players[0].lx, 0);
+        XCTAssertEqual(state.players[slot].buttons, DM_BTN_A);
+    }
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+}
+
+- (void)testLiveJoyConsJoinOnButtonAndKeepPromptInputOutOfGame {
+    UIWindow *window = [self harnessRootViewController].view.window;
+    XCTAssertTrue(window && front_metal_layer());
+    if (!window || !front_metal_layer()) return;
+
+    const char *env = getenv("DM_PAD_PRESS_TO_JOIN");
+    NSString *saved = env ? @(env) : nil;
+    setenv("DM_PAD_PRESS_TO_JOIN", "1", 1);
+    CGRect bounds = window.bounds;
+    [self padForLayout:dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, DM_PICTURE_16_9) bounds:bounds];
+    if (saved) setenv("DM_PAD_PRESS_TO_JOIN", saved.UTF8String, 1);
+    else unsetenv("DM_PAD_PRESS_TO_JOIN");
+
+    DuoLiveController *left = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (L)"];
+    DuoLiveController *right = [[DuoLiveController alloc] initWithCategory:@"Nintendo Switch Joy-Con (R)"];
+    [self setHarnessControllers:@[(GCController *)right, (GCController *)left] notification:GCControllerDidConnectNotification];
+    XCTAssertEqual(duo_harness_state().connected_players, 0u);
+    [left.input moveX:1 y:0];
+    [left.input setPressed:YES button:GCInputButtonHome];
+    XCTAssertEqual(duo_harness_state().connected_players, 0u, @"Stick and system Home must not join a player");
+    [left.input setPressed:YES button:GCInputLeftShoulder];
+    XCTAssertEqual(duo_harness_state().connected_players, 1u, @"First press gets player 1 even when listed second");
+    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L);
+
+    NSUInteger originalSubviews = window.subviews.count;
+    XCTestExpectation *closed = [self expectationWithDescription:@"controller prompt returns"];
+    __block int result = -1;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        result = front_ctrl_support(2, 2);
+        [closed fulfill];
+    });
+    NSPredicate *shown = [NSPredicate predicateWithBlock:^BOOL(UIWindow *candidate, NSDictionary *bindings) {
+        (void)bindings; return candidate.subviews.count > originalSubviews;
+    }];
+    XCTNSPredicateExpectation *open = [[XCTNSPredicateExpectation alloc] initWithPredicate:shown object:window];
+    XCTAssertEqual([XCTWaiter waitForExpectations:@[open] timeout:5], XCTWaiterResultCompleted);
+    XCTAssertEqual(duo_harness_state().players[0].buttons, 0u);
+    [right.input setPressed:YES button:GCInputButtonA];   // Switch B joins the second player and completes the prompt
+    [self waitForExpectations:@[closed] timeout:5];
+    XCTAssertEqual(result, 1);
+    XCTAssertEqual(duo_harness_state().connected_players, 3u);
+    XCTAssertEqual(duo_harness_state().players[1].buttons, 0u, @"The button that closed the prompt is held back until release");
+    [right.input setPressed:NO button:GCInputButtonA];
+    XCTAssertEqual(duo_harness_state().players[0].buttons, DM_BTN_L, @"Both players' current input is restored on release");
+    [right.input setPressed:YES button:GCInputButtonA];
+    XCTAssertEqual(duo_harness_state().players[1].buttons, DM_BTN_B);
+    [self setHarnessControllers:@[] notification:GCControllerDidDisconnectNotification];
+}
 
 - (void)testControllersKeepIndependentPlayersAndLayoutKeepsMotionState {
     if (@available(iOS 13.0, *)) {

@@ -12,13 +12,42 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
 GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
 $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
 GAME_H = ../gen/$(GAME)/game_profile.h
-run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2
+.PHONY: bcat bcat-sanitize bcat-fixtures bcat-launch bcat-tools
+# The optional static crypto prefix belongs to the online-provider series. A
+# standalone source fixture supplies its reviewed prefix explicitly; this
+# Makefile does not download or build a second cryptography dependency.
+BCAT_CRYPTO_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+BCAT_CRYPTO_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
+BCAT_WARN = -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -Wno-deprecated-declarations
+$(B)/t_bcat_store: t_bcat_store.m ../hle_bcat_apple.m ../nextendo_bcat.h | $(B)
+	test -n "$(DM_OPENSSL_ROOT)"
+	$(CLANG) $(BCAT_WARN) -fobjc-arc $(BCAT_CRYPTO_FLAGS) -o $@ t_bcat_store.m $(BCAT_CRYPTO_LIB) -lz -framework Foundation
+$(B)/t_bcat_sdk: t_bcat_sdk.c t_bcat_guest.S ../hle_bcat.c ../nextendo_bcat.h ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_sdk.c t_bcat_guest.S ../hle_bigstack.c
+$(B)/t_bcat_fs: t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_fs.c ../nextendo_bcat.h ../hle_bigstack.c ../save_sync.c $(GAME_H) | $(B)
+	$(CLANG) $(BCAT_WARN) $(GINC) -o $@ t_bcat_fs.c t_bcat_fs_provider.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_fs $(B)/t_fs_directory $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan $(B)/t_save_sync $(B)/t_bcat_fs: bcat_absent.h
+bcat-fixtures: $(B)/t_bcat_store $(B)/t_bcat_sdk $(B)/t_bcat_fs
+	$(B)/t_bcat_store
+	$(PYTHON) test_bcat_zip.py $(abspath $(B))/t_bcat_store
+	$(B)/t_bcat_sdk
+	$(B)/t_bcat_fs
+bcat-launch:
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) test_bcat_launch.py
+bcat-tools:
+	DM_OPENSSL_ROOT="$(DM_OPENSSL_ROOT)" $(PYTHON) -m unittest discover -s ../../tools/tests -p test_nextendo_bcat.py
+bcat: bcat-fixtures bcat-launch bcat-tools
+bcat-sanitize:
+	$(MAKE) B=build/bcat-asan SAN="-fsanitize=address,undefined -fno-omit-frame-pointer" bcat
+run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_friends $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_audren_sv $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2 $(B)/t_input_map
 	$(B)/t_language
 	$(B)/t_heap_size
 	$(B)/t_touch
 	$(B)/t_gesture
 	$(B)/t_oe $(QUIET)
+	$(B)/t_friends
 	$(B)/t_fs $(QUIET)
+	$(B)/t_fs_mutation $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list
 	$(B)/t_thread_leak
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_case $(QUIET)
@@ -48,7 +77,9 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_pause_stress --seconds 1
 	$(B)/t_pctl
 	$(B)/t_net_eventfd
+	$(B)/t_net_loopback
 	$(B)/t_sf
+	$(B)/t_audren_sv
 	$(B)/t_time
 	$(B)/t_sync_wait $(QUIET)
 	$(B)/t_shared_font
@@ -56,37 +87,50 @@ run: $(B)/t_mii $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_siz
 	$(B)/t_vorbis
 	$(B)/t_vorbis_divides
 	$(B)/t_movie_vpx
+	$(B)/t_codec_opus
 	$(B)/t_codec_video
 	$(B)/t_movie_avc
 	$(B)/t_nv
+	$(B)/t_objmap
 	$(B)/t_vi_history $(QUIET)
 	$(B)/t_nfc
 	$(B)/t_motion
 	$(B)/t_motion_apple
 	$(B)/t_pad_apple
+	$(B)/t_account
 	$(B)/t_home_quit
 	$(B)/t_home_quit_mac
 	$(B)/t_ctrl_prompt
 	$(B)/t_motion_pro
 	$(B)/t_motion_pro_mac
+	$(B)/t_jc1
 	TMPDIR="$(abspath $(B))" $(B)/t_hid
 	$(B)/t_pad_hid
 	$(B)/t_pad_hid_mac
 	$(B)/t_pad_pro
 	$(B)/t_switch2
+	$(B)/t_input_map
 	$(B)/t_haptics
 	$(B)/t_haptics_apple
+	$(B)/t_front_role
 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
 	$(B)/t_nro
 	$(B)/t_symbols
+	$(B)/t_server_environment
 run: $(B)/t_nro
 run: $(B)/t_sync_wait
-$(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sync_wait.c t_condvar_stub.c
+$(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_GUEST_CLOCK -I.. $(GINC) -o $@ t_sync_wait.c t_condvar_stub.c ../hle_os.c
 sync-wait: $(B)/t_sync_wait
 	$(B)/t_sync_wait
 .PHONY: sync-wait
 run: $(B)/t_symbols
+run: $(B)/t_server_environment
+$(B)/t_server_environment: t_server_environment.c t_net_off.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c t_net_off.c
+.PHONY: server-environment
+server-environment: $(B)/t_server_environment
+	$(B)/t_server_environment
 $(B)/t_symbols: t_symbols.c ../hle.c ../loader.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_symbols.c
 .PHONY: symbols
@@ -105,11 +149,17 @@ $(B)/t_audren_layout: t_audren_layout.c ../hle_audren.c ../hle.h ../dm.h $(GAME_
 .PHONY: audren-layout
 audren-layout: $(B)/t_audren_layout
 	$(B)/t_audren_layout
-$(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle_misc.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c ../hle_misc.c ../hle_bigstack.c
+$(B)/t_system_event: t_system_event.c ../hle_thread.c ../hle_sdk16.c ../hle_misc.c ../hle_bigstack.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_system_event.c ../hle_misc.c ../hle_bigstack.c ../hle_net_diag.c
 .PHONY: system-event
 system-event: $(B)/t_system_event
 	$(B)/t_system_event
+$(B)/t_network_clock: t_network_clock.c ../hle_network_clock.c ../hle_thread.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_network_clock.c
+.PHONY: network-clock
+network-clock: $(B)/t_network_clock
+	$(B)/t_network_clock
+run: network-clock
 $(B)/t_nro: t_nro.c ../loader.c ../hle_ro.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Wno-unused-function -Wno-deprecated-declarations -I.. $(GINC) -o $@ t_nro.c
 .PHONY: nro
@@ -135,55 +185,71 @@ $(B)/t_gesture: t_gesture.c ../hle_touch.c ../front.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_gesture.c ../hle_touch.c
 $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_thread_leak.c
-$(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
+
+run: $(B)/t_fs_mutation
+$(B)/t_fs_mutation: t_fs_mutation.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_mutation.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 # Inject only the folder handle allocation; directory I/O remains real.
-$(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_fs_directory: t_fs_directory.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../romfs_image.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_fs_directory.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 .PHONY: fs-directory
 fs-directory: $(B)/t_fs_directory
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_directory
 run: fs-directory
-$(B)/t_fs_commit_list: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
-$(B)/t_fs_commit_list_tsan: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -fsanitize=thread -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_fs_commit_list: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
+$(B)/t_fs_commit_list_tsan: t_fs_commit_list.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -fsanitize=thread -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_fs_commit_list.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 .PHONY: fs-tsan
 fs-tsan: $(B)/t_fs_commit_list_tsan
 	TMPDIR="$(abspath $(B))" $(B)/t_fs_commit_list_tsan
 run: $(B)/t_mii_sysdata
-$(B)/t_mii_sysdata: t_mii_sysdata.c ../hle_fs.c ../hle_mii.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_mii_sysdata.c ../hle_bigstack.c ../save_sync.c -lz
-$(B)/t_fs_case: t_fs_case.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_mii_sysdata: t_mii_sysdata.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../hle_mii.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_mii_sysdata.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c -lz
+$(B)/t_fs_case: t_fs_case.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 run: $(B)/t_save_sync $(B)/t_save_sync_metadata
-$(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../hle_account_users.c ../account_users.h ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c ../hle_account_users.c
 $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h | $(B)
 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. -o $@ t_save_sync_metadata.c
 .PHONY: save-sync
 save-sync: $(B)/t_save_sync $(B)/t_save_sync_metadata
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync $(QUIET)
 	TMPDIR="$(abspath $(B))" $(B)/t_save_sync_metadata $(QUIET)
-$(B)/t_audio: t_audio.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c -framework AudioToolbox
+AUDIO_INPUT_STUB = ../audio_input.c audio_input_platform_stub.c
+AUDIO_INPUT_DEPS = $(AUDIO_INPUT_STUB) ../audio_input.h
+$(B)/t_audio: t_audio.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 $(B)/t_mii: t_mii.c ../hle_mii.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_mii.c
-$(B)/t_output_stream: t_output_stream.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c -framework AudioToolbox
-$(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
-$(B)/t_audio_stats: t_audio_stats.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stats.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_output_stream: t_output_stream.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_output_stream.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+$(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+$(B)/t_audio_stats: t_audio_stats.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_stats.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
 run: $(B)/t_audio_stats
-$(B)/t_audio_device: t_audio_device.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_device.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_audio_device: t_audio_device.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_device.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+.PHONY: audio-live
+$(B)/t_audio_live: t_audio_live.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_audio_live.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation -lm
+audio-live: $(B)/t_audio_live   # real output on DM_AUDIO_DEVICE: not in `run`
 .PHONY: audio-device
 audio-device: $(B)/t_audio_device
 	$(B)/t_audio_device
 run: audio-device
-$(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c -framework AudioToolbox
+$(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c $(AUDIO_INPUT_DEPS) ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c ../hle_bigstack.c $(AUDIO_INPUT_STUB) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+$(B)/t_audio_input: t_audio_input.c ../audio_input.c ../audio_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_audio_input.c
+.PHONY: audio-input
+audio-input: $(B)/t_audio_input
+	$(B)/t_audio_input
+run: audio-input
 run: $(B)/t_fpslock
 $(B)/t_fpslock: t_fpslock.c ../hle_fpslock.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function $(GINC) -o $@ t_fpslock.c
@@ -212,15 +278,20 @@ watch-sample: $(B)/t_watch_sample
 	$(B)/t_watch_sample
 $(B)/t_altstack: t_altstack.c t_altstack_stub.c ../crash.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_altstack.c t_altstack_stub.c ../crash.c
-$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_net_eventfd.c
+$(B)/t_net_eventfd: t_net_eventfd.c ../hle_net.c ../hle_net.h ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_eventfd.c ../hle_net_diag.c $(NET_SOURCES)
+run: $(B)/t_net_loopback
+$(B)/t_net_loopback: t_net_loopback.c ../hle_net.c ../hle_net.h ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(if $(findstring -fsanitize,$(SAN)),,-fsanitize=address,undefined) -I.. $(GINC) -o $@ t_net_loopback.c ../hle_net_diag.c $(NET_SOURCES)
 
 $(B)/t_pctl: t_pctl.c ../hle_misc.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_pctl.c
-$(B)/t_sf: t_sf.c ../hle_sf.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sf.c
-$(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c
+$(B)/t_sf: t_sf.c ../hle_sf.c ../hle_irs.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_sf.c ../hle_net_diag.c
+$(B)/t_audren_sv: t_audren_sv.c ../hle_sf.c ../hle_audren_sv.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. $(GINC) -o $@ t_audren_sv.c ../hle_net_diag.c
+$(B)/t_shared_font: t_shared_font.c ../hle_sdk16.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_shared_font.c ../hle_net_diag.c
 # nn::vi::ListFrameHistory: the SDK's FrameInfo, newest first, from the present queue's progress
 run: $(B)/t_vi_history
 $(B)/t_vi_history: t_vi_history.c ../../gfx/hle_vi.c ../hle.h ../dm.h $(GAME_H) | $(B)
@@ -228,15 +299,19 @@ $(B)/t_vi_history: t_vi_history.c ../../gfx/hle_vi.c ../hle.h ../dm.h $(GAME_H) 
 run: $(B)/t_nv
 $(B)/t_nv: t_nv.c ../../gfx/hle_nv.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_nv.c
+# The guest object side table: linear probing with backward-shift deletion keeps every key once and reachable
+run: $(B)/t_objmap
+$(B)/t_objmap: t_objmap.c ../hle_os.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_objmap.c
 # nn::nfc answered without nfc:user (NFC disabled), beside the nfp no-tag answers
 run: $(B)/t_nfc
-$(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_nfc.c
+$(B)/t_nfc: t_nfc.c ../hle_sdk16.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -I.. $(GINC) -o $@ t_nfc.c ../hle_net_diag.c
 .PHONY: nfc
 nfc: $(B)/t_nfc
 	$(B)/t_nfc
-$(B)/t_language: t_language.c ../hle_sdk16.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c
+$(B)/t_language: t_language.c ../hle_sdk16.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-frame-address -fsanitize=address,undefined -I.. $(GINC) -o $@ t_language.c ../hle_net_diag.c
 $(B)/t_motion: t_motion.c ../motion_fusion.h | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -o $@ t_motion.c -lm
 run: $(B)/t_motion_apple
@@ -245,6 +320,15 @@ $(B)/t_motion_apple: t_motion_apple.m ../motion_apple.h ../dm_input.h | $(B)
 run: $(B)/t_pad_apple
 $(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_pad_apple.m -framework Foundation -framework GameController
+run: $(B)/t_account
+$(B)/t_account: t_account.c t_nextendo_off.c ../hle_account.c ../hle_account_users.c ../account_users.h ../front.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_account.c t_nextendo_off.c ../hle_account_users.c ../hle_bigstack.c
+run: account-saves
+.PHONY: account-saves
+account-saves: $(B)/t_account_save
+	$(B)/t_account_save
+$(B)/t_account_save: t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account.c ../hle_account_users.c ../account_users.h ../hle_fs.c ../hle_bigstack.c ../save_sync.c ../hle.h ../front.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
 run: $(B)/t_home_quit $(B)/t_home_quit_mac
 $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
@@ -253,25 +337,35 @@ $(B)/t_home_quit_mac: t_home_quit_mac.m ../home_quit_mac.h | $(B)
 run: $(B)/t_ctrl_prompt
 $(B)/t_ctrl_prompt: t_ctrl_prompt.c ../ctrl_prompt.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -I.. -o $@ t_ctrl_prompt.c
-run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_pad_hid_mac
+run: $(B)/t_motion_pro $(B)/t_motion_pro_mac $(B)/t_pad_hid_mac $(B)/t_jc1
+$(B)/t_jc1: t_jc1.c ../pad_jc1.h ../pad_pro.h ../hle_haptics.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_jc1.c
 $(B)/t_motion_pro: t_motion_pro.c ../motion_pro.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -fsanitize=address,undefined -o $@ t_motion_pro.c
-$(B)/t_pad_hid_mac: t_pad_hid_mac.m ../pad_hid_mac.h ../pad_hid.h ../pad_pro.h ../motion_pro.h ../dm_input.h | $(B)
+$(B)/t_pad_hid_mac: t_pad_hid_mac.m ../pad_hid_mac.h ../pad_hid.h ../pad_pro.h ../pad_jc1.h ../hle_haptics.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_pad_hid_mac.m -framework Foundation -framework GameController -framework IOKit
 $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
 $(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
+$(B)/t_input_map: t_input_map.c ../input_map.h ../dm_input.h | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. -o $@ t_input_map.c
 $(B)/t_hid_tsan: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -g -fsanitize=thread -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_hid.c ../hle_haptics.c ../hle_bigstack.c
+# The default application task role lifts the QoS ceiling for a Mac host without a window.
+run: $(B)/t_front_role
+$(B)/t_front_role: t_front_role.c ../front_role.h | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_front_role.c
 $(B)/t_haptics: t_haptics.c ../hle_haptics.c ../hle_haptics.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_haptics.c ../hle_haptics.c
 $(B)/t_haptics_apple: t_haptics_apple.m ../haptics_apple.m ../haptics_apple.h ../hle_haptics.c ../hle_haptics.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_haptics_apple.m ../hle_haptics.c -framework Cocoa -framework GameController -framework CoreHaptics -framework IOKit
-$(B)/t_time: t_time.c ../hle_time.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c
+$(B)/t_time: t_time.c ../hle_time.c ../hle_table.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c ../hle_table.c
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
+$(B)/t_friends: t_friends.c t_nextendo_off.c ../hle_friends.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_friends.c t_nextendo_off.c
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
@@ -303,16 +397,19 @@ $(B)/t_vorbis: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(B)
 $(B)/t_vorbis_divides: t_vorbis.c ../../third_party/stb_vorbis/stb_vorbis.c | $(B)
 	$(CLANG) -O1 -g -DSTB_VORBIS_DIVIDES_IN_RESIDUE -Wno-unused-function -Wno-tautological-compare -o $@ t_vorbis.c
 run: $(B)/t_movie_vpx
+run: $(B)/t_codec_opus
 run: $(B)/t_codec_video
 run: $(B)/t_movie_avc
-$(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
+$(B)/t_movie_avc: t_movie_avc.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_vt.h $(GAME_H) ../gen/vpx/libvpx.a | $(B)
 	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_avc.c ../gen/vpx/libvpx.a \
-		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
+		-framework AudioToolbox -framework CoreAudio -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 $(B)/t_movie_vpx: t_movie_vpx.c ../hle_movie.c $(GAME_H) ../gen/vpx/libvpx.a | $(B)
-	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox
-$(B)/t_codec_video: t_codec_video.c ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
+	$(CLANG) -O1 -g -Wno-unused-function -Wno-tautological-compare $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/stb_vorbis -Wl,-dead_strip -o $@ t_movie_vpx.c ../gen/vpx/libvpx.a -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
+$(B)/t_codec_opus: t_codec_opus.c ../hle_codec.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_codec_opus.c
+$(B)/t_codec_video: t_codec_video.c movie_vt_data.h ../hle_codec_video.c ../hle_movie.c ../hle_movie_avc.c ../hle_movie_avc.h ../hle_movie_av1.c ../hle_movie_av1.h ../hle_movie_vt.h ../hle_movie_yuv.h $(GAME_H) ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -Wno-tautological-compare -fsanitize=address,undefined $(GINC) -I../../third_party/libvpx -I../../third_party/libvpx/config -I../../third_party/dav1d/include -I../../third_party/stb_vorbis -o $@ t_codec_video.c ../gen/vpx/libvpx.a ../gen/dav1d/libdav1d.a \
-		-framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
+		-framework AudioToolbox -framework CoreAudio -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework CoreFoundation
 ../gen/vpx/libvpx.a: FORCE
 	$(MAKE) -C .. GAME=$(GAME) gen/vpx/libvpx.a
 ../gen/dav1d/libdav1d.a: FORCE
@@ -377,6 +474,15 @@ notify-scheduler: $(B)/t_notify_sched
 	$(B)/t_notify_sched --all-peers
 run: notify-scheduler
 
+# Same-core handoff notification and timed recheck, using real thread SVCs.
+$(B)/t_handoff_wait: t_handoff_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -DDM_TEST_THREAD_ENTER -I.. $(GINC) -o $@ t_handoff_wait.c t_condvar_stub.c
+.PHONY: handoff-wait
+handoff-wait: $(B)/t_handoff_wait
+	$(B)/t_handoff_wait
+	$(B)/t_handoff_wait --all-peers
+run: handoff-wait
+
 # Sanitizer builds (../../sanitizers/sanitizers.mk): make asan runs every test of run under ASan and UBSan; make tsan-threads runs the tests that start threads under TSan
 # (t_audio_spsc, t_hid and t_svc_memory have their own TSan targets above: tsan, memory-tsan)
 include ../../sanitizers/sanitizers.mk
@@ -384,11 +490,15 @@ include ../../sanitizers/sanitizers.mk
 asan:
 	@$(call san_fresh,$(B)/asan,$(ASAN_FLAGS))
 	$(ASAN_ENV) $(MAKE) B=$(B)/asan SAN="$(ASAN_FLAGS)" run
-TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_altstack t_sync_wait
+TSAN_T = t_audio t_audio_stats t_audio_device t_thread_leak t_oe t_fs_commit_list t_fs_case t_save_sync t_condvar t_condvar_old t_preempt t_system_event t_notify_sched t_handoff_wait t_altstack t_sync_wait
+TSAN_T += t_net_eventfd t_net_loopback t_account
 tsan-threads:
 	@$(call san_fresh,$(B)/tsan,$(TSAN_FLAGS))
 	$(TSAN_ENV) $(MAKE) B=$(B)/tsan SAN="$(TSAN_FLAGS)" tsan-threads-run
 tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
+	$(B)/t_account
+	$(B)/t_net_eventfd
+	$(B)/t_net_loopback
 	$(B)/t_audio
 	$(B)/t_audio_stats
 	$(B)/t_audio_device
@@ -404,6 +514,8 @@ tsan-threads-run: $(addprefix $(B)/,$(TSAN_T))
 	$(B)/t_system_event
 	$(B)/t_notify_sched
 	$(B)/t_notify_sched --all-peers
+	$(B)/t_handoff_wait
+	$(B)/t_handoff_wait --all-peers
 	$(B)/t_altstack
 	$(B)/t_sync_wait
 	DM_QOS_MAP=1 $(B)/t_notify_sched
@@ -425,3 +537,170 @@ coverage:
 	rm -rf $(B)/cov/prof
 	LLVM_PROFILE_FILE="$(call cov_profile,$(B)/cov)" $(MAKE) -i B=$(B)/cov SAN="$(COV_FLAGS)" run
 	@$(call cov_export,$(B)/cov)
+
+# Local transport fixtures use only synthetic packets and loopback peers.
+NET_SOURCES = ../hle_net_backend.c ../hle_nsd_backend.c t_net_write_stub.c
+NET_HEADERS = ../nsd.h ../net_socket.h ../net_discovery.h ../net_vpn.h ../net_discovery_queue.inc ../discovery_protocol.h
+NET_FLAGS = -O1 -g -Wall -Wextra -Werror -Wno-unused-function
+$(B)/t_hle_wait: t_hle_wait.c t_hle_wait.S ../hle.h ../entry.S ../hle_bigstack.c $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_hle_wait.c t_hle_wait.S ../entry.S ../hle_bigstack.c
+$(B)/t_net: t_net.c ../hle_net.c ../hle_offline.c ../hle_net_diag.c ../hle_net_diag.h ../hle.h ../entry.S ../hle_bigstack.c $(NET_SOURCES) $(NET_HEADERS) $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net.c ../hle_net.c ../hle_offline.c ../hle_net_diag.c $(NET_SOURCES) ../entry.S ../hle_bigstack.c
+$(B)/t_net_discovery: t_net_discovery.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -o $@ t_net_discovery.c $(NET_SOURCES)
+$(B)/t_discovery_protocol: t_discovery_protocol.c ../discovery_protocol.h | $(B)
+	$(CLANG) -std=c11 -O2 -Wall -Wextra -Werror -pedantic -o $@ t_discovery_protocol.c
+LDN_SOURCES = ../hle_ldn.c ../hle_ldn_protocol.c
+LDN_HEADERS = ../hle_ldn.h $(NET_HEADERS)
+$(B)/t_ldn: t_ldn.c $(LDN_SOURCES) $(LDN_HEADERS) $(NET_SOURCES) | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_NET_TEST -DDM_LDN_TEST -DDM_LDN_NET_TEST -o $@ t_ldn.c $(LDN_SOURCES) $(NET_SOURCES)
+$(B)/t_ldn_events: t_ldn_events.c ../hle_ldn.c ../hle_ldn_protocol.c ../hle_ldn.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_ldn_events.c ../hle_ldn_protocol.c
+.PHONY: local-network-tests
+local-network-tests: $(B)/t_hle_wait $(B)/t_net $(B)/t_net_discovery $(B)/t_discovery_protocol $(B)/t_ldn $(B)/t_ldn_events
+	$(B)/t_hle_wait
+	$(B)/t_oe_handoff
+	$(B)/t_net --no-broadcast
+	$(B)/t_net_discovery
+	$(B)/t_discovery_protocol
+	$(B)/t_ldn
+	$(B)/t_ldn_events
+	$(B)/t_friends_history
+run: local-network-tests
+
+$(B)/t_friends_history: t_friends_history.c ../hle_friends_history.c ../friends_history.h ../hle_friends.c ../account_local.h memory_profile/game_profile.h | $(B)
+	$(CLANG) $(NET_FLAGS) -DDM_FRIENDS_HISTORY_TEST -Imemory_profile -o $@ t_friends_history.c ../hle_friends_history.c
+local-network-tests: $(B)/t_friends_history
+
+$(B)/t_oe_handoff: t_oe_handoff.c t_condvar_stub.c ../hle_thread.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_oe_handoff.c t_condvar_stub.c
+local-network-tests: $(B)/t_oe_handoff
+
+# A kernel socket receive must prepare tracked guest pages, including after waits.
+$(B)/t_net_write_prepare: t_net_write_prepare.c ../hle_net_backend.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h ../net_discovery.h ../net_discovery_queue.inc ../discovery_protocol.h ../../gfx/nvn/nvn_dirty.c ../../gfx/nvn/nvn_dirty.h $(GAME_H) | $(B)
+	$(CLANG) $(NET_FLAGS) $(GINC) -o $@ t_net_write_prepare.c ../hle_nsd_backend.c ../../gfx/nvn/nvn_dirty.c
+.PHONY: net-write net-write-sanitize
+net-write: $(B)/t_net_write_prepare
+	$(B)/t_net_write_prepare
+net-write-sanitize:
+	$(call san_fresh,build/net-write-asan,$(ASAN_FLAGS))
+	$(ASAN_ENV) $(MAKE) B=build/net-write-asan SAN="$(ASAN_FLAGS)" net-write
+run: net-write
+
+# Original synthetic DNSService callbacks exercise ownership/cancellation offline.
+$(B)/t_resolver_cancel: t_resolver_cancel.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -Wno-unused-function -o $@ t_resolver_cancel.c t_net_write_stub.c ../hle_nsd_backend.c
+.PHONY: resolver
+resolver: $(B)/t_resolver_cancel
+	$(B)/t_resolver_cancel
+run: resolver
+# Optional system API smoke uses only localhost and is not part of CI.
+$(B)/t_resolver_live: t_resolver_live.c $(NET_SOURCES) $(NET_HEADERS) | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_resolver_live.c $(NET_SOURCES)
+.PHONY: resolver-live
+resolver-live: $(B)/t_resolver_live
+	$(B)/t_resolver_live
+# Native TLS and explicit provider policy; all certificates are ephemeral fixtures.
+DM_OPENSSL_ROOT ?= $(shell python3 ../../tools/apple_crypto.py macos)
+PRIVATE_PKI_FLAGS = -DDM_OPENSSL_X509 "-I$(DM_OPENSSL_ROOT)/include"
+PRIVATE_PKI_LIB = "$(DM_OPENSSL_ROOT)/lib/libcrypto.a"
+OPENSSL_TOOL ?= $(shell command -v openssl)
+SSL_SOURCES = t_ssl.m t_net_write_stub.c ../hle_ssl.c ../hle_net_diag.c ../hle_ssl_apple.m ../hle_nextendo_x509.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_bigstack.c ../entry.S
+SSL_DEPS = t_gate_fixture.h ../nsd.h $(SSL_SOURCES) ../ssl_backend.h ../net_socket.h ../hle.h $(GAME_H) test_ssl_transport.py
+SSL_FLAGS = -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror -Wno-unused-function $(GINC)
+$(B)/t_ssl $(B)/t_ssl_asan $(B)/t_nextendo_routes $(B)/t_nextendo_routes_asan: ../ssl_trace.h
+$(B)/t_ssl_trace: t_ssl_trace.c ../ssl_trace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_ssl_trace.c
+$(B)/t_ssl_trace_asan: t_ssl_trace.c ../ssl_trace.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_ssl_trace.c
+$(B)/t_ssl: $(SSL_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -o $@ $(SSL_SOURCES) -framework Foundation -framework Security
+$(B)/t_ssl_asan: $(SSL_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(SSL_SOURCES) -framework Foundation -framework Security
+.PHONY: ssl ssl-sanitize
+ssl: $(B)/t_ssl $(B)/t_ssl_trace
+	$(B)/t_ssl_trace
+	$(PYTHON) test_ssl_transport.py $(B)/t_ssl
+ssl-sanitize: $(B)/t_ssl_asan $(B)/t_ssl_trace_asan
+	$(B)/t_ssl_trace_asan
+	$(PYTHON) test_ssl_transport.py $(B)/t_ssl_asan
+
+ROUTE_SOURCES = t_nextendo_routes.c t_net_write_stub.c ../hle_nextendo_routes.c ../hle_net_backend.c ../hle_nsd_backend.c ../hle_ssl_apple.m ../hle_nextendo_x509.c
+ROUTE_DEPS = ../nsd.h $(ROUTE_SOURCES) ../nextendo_routes.h ../net_socket.h ../ssl_backend.h test_nextendo_routes.py test_ssl_transport.py Makefile
+$(B)/t_nextendo_routes: $(ROUTE_DEPS) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+$(B)/t_nextendo_routes_asan: $(ROUTE_DEPS) | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -mmacosx-version-min=14.0 -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(ROUTE_SOURCES) $(PRIVATE_PKI_LIB) -framework Foundation -framework Security
+.PHONY: nextendo-routes nextendo-routes-sanitize
+nextendo-routes: $(B)/t_nextendo_routes
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes
+nextendo-routes-sanitize: $(B)/t_nextendo_routes_asan
+	$(PYTHON) test_nextendo_routes.py $(B)/t_nextendo_routes_asan
+
+$(B)/t_nextendo_x509: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
+$(B)/t_nextendo_x509_asan: t_nextendo_x509.c ../hle_nextendo_x509.c ../nextendo_x509.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror $(PRIVATE_PKI_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_nextendo_x509.c ../hle_nextendo_x509.c $(PRIVATE_PKI_LIB)
+.PHONY: nextendo-x509 nextendo-x509-sanitize
+nextendo-x509: $(B)/t_nextendo_x509
+	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509 "$(OPENSSL_TOOL)"
+nextendo-x509-sanitize: $(B)/t_nextendo_x509_asan
+	$(PYTHON) test_nextendo_x509.py $(B)/t_nextendo_x509_asan "$(OPENSSL_TOOL)"
+
+$(B)/t_nsd: t_nsd.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_nsd.c ../hle_nsd_backend.c
+$(B)/t_nsd_asan: t_nsd.c ../hle_nsd_backend.c ../nsd.h ../net_socket.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_nsd.c ../hle_nsd_backend.c
+.PHONY: nsd nsd-sanitize
+nsd: $(B)/t_nsd
+	$(B)/t_nsd
+nsd-sanitize: $(B)/t_nsd_asan
+	$(B)/t_nsd_asan
+run: ssl nextendo-routes nextendo-x509 nsd
+
+ACCOUNT_SOURCES = t_nextendo_account.m ../hle_account.c ../hle_account_users.c ../hle_nextendo_apple.m ../hle_nextendo_api_apple.m ../hle_bigstack.c ../entry.S
+ACCOUNT_DEPS = t_gate_fixture.h ../nextendo_login_apple.inc $(ACCOUNT_SOURCES) ../nextendo_account.h ../net_socket.h ../hle.h $(GAME_H)
+$(B)/t_nextendo_account: $(ACCOUNT_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
+$(B)/t_nextendo_account_asan: $(ACCOUNT_DEPS) | $(B)
+	$(CLANG) $(SSL_FLAGS) -fsanitize=address,undefined -mllvm -asan-globals=0 -fno-omit-frame-pointer -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
+.PHONY: nextendo-account nextendo-account-sanitize
+# The Mac sign-in tool (dm/tools/nextendo_login.m) is built with the account fixtures, so CI compiles it; it signs in only when run by hand
+$(B)/nextendo_login: ../../tools/nextendo_login.m ../nextendo_login_apple.inc | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -o $@ ../../tools/nextendo_login.m -framework Foundation -framework Security -framework AppKit
+nextendo-account: $(B)/t_nextendo_account $(B)/nextendo_login
+	$(B)/t_nextendo_account
+nextendo-account-sanitize: $(B)/t_nextendo_account_asan $(B)/nextendo_login
+	$(B)/t_nextendo_account_asan
+API_SOURCES = t_nextendo_api.m ../hle_nextendo_api_apple.m
+$(B)/t_nextendo_api: $(API_SOURCES) ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -o $@ $(API_SOURCES) -framework Foundation
+$(B)/t_nextendo_api_asan: $(API_SOURCES) ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(API_SOURCES) -framework Foundation
+.PHONY: nextendo-api nextendo-api-sanitize
+nextendo-api: $(B)/t_nextendo_api
+	$(B)/t_nextendo_api
+nextendo-api-sanitize: $(B)/t_nextendo_api_asan
+	$(B)/t_nextendo_api_asan
+
+SOCIAL_SOURCES = t_nextendo_social.m ../hle_nextendo_social_apple.m ../hle_nextendo_api_apple.m ../hle_nextendo_friends.c
+$(B)/t_nextendo_social: $(SOCIAL_SOURCES) ../nextendo_social.h ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -Isocial_profile -o $@ $(SOCIAL_SOURCES) -framework Foundation
+$(B)/t_nextendo_social_asan: $(SOCIAL_SOURCES) ../nextendo_social.h ../nextendo_api_apple.h | $(B)
+	$(CLANG) -O1 -g -fobjc-arc -Wall -Wextra -Werror -DDM_NEXTENDO_API_TEST -Isocial_profile -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ $(SOCIAL_SOURCES) -framework Foundation
+.PHONY: nextendo-social nextendo-social-sanitize
+nextendo-social: $(B)/t_nextendo_social
+	$(B)/t_nextendo_social
+nextendo-social-sanitize: $(B)/t_nextendo_social_asan
+	$(B)/t_nextendo_social_asan
+run: nextendo-account nextendo-api nextendo-social
+$(B)/t_online_policy: t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -o $@ t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c
+$(B)/t_online_policy_asan: t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c ../net_socket.h ../nsd.h | $(B)
+	$(CLANG) -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -o $@ t_online_policy.c t_net_write_stub.c ../hle_net_backend.c ../hle_nsd_backend.c
+.PHONY: online-policy online-policy-sanitize
+online-policy: $(B)/t_online_policy
+	$(B)/t_online_policy
+online-policy-sanitize: $(B)/t_online_policy_asan
+	$(B)/t_online_policy_asan
+run: online-policy

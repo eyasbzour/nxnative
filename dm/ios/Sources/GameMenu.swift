@@ -18,7 +18,9 @@ private func gameMenuItems() -> [UIMenuElement] {
     let layouts = (0..<3).filter { dm_pad_layout_offered(Int32($0)) }.map { l in
         UIAction(title: names[l], state: dm_pad_layout() == l ? .on : .off) { _ in dm_pad_layout_set(Int32(l)) }
     }
-    let layout = UIMenu(title: "Controller layout", options: .singleSelection, children: layouts)   // a choice's value shows in its submenu: a subtitle would make each row two lines
+    let edit = UIAction(title: "Edit controls", image: UIImage(systemName: "slider.horizontal.3")) { _ in dm_pad_edit() }   // move, resize, restyle and fade the on-screen controls
+    // a choice's value shows in its submenu: a subtitle would make each row two lines
+    let layout = UIMenu(title: "Controller layout", children: [UIMenu(options: [.displayInline, .singleSelection], children: layouts), edit])
     var items: [UIMenuElement] = []
     var placed = false
     if let m = gameMenuModel {
@@ -30,6 +32,7 @@ private func gameMenuItems() -> [UIMenuElement] {
         }
     }
     if !placed { items.insert(UIMenu(options: .displayInline, children: [layout]), at: 0) }
+    items.append(Unmanaged<UIMenu>.fromOpaque(dm_quit_menu()).takeRetainedValue())   // Quit <game>, last and on its own: it opens the quit prompt (front_ios.m)
     return items
 }
 
@@ -42,7 +45,7 @@ private func gameMenuRow(_ m: LauncherModel, _ s: Setting) -> UIMenuElement {
         if fixed { a.subtitle = "Set in env.txt" }
         return a
     }
-    let options = s.options ?? []
+    let options = offeredOptions(s, current: now)
     let current = options.first { $0[0] == now }?[1] ?? now
     let actions = options.map { o in UIAction(title: o[1], attributes: attributes, state: o[0] == now ? .on : .off) { _ in pick(o[0]) } }
     return UIMenu(title: s.label, subtitle: fixed ? "\(current), set in env.txt" : nil, options: .singleSelection, children: actions)

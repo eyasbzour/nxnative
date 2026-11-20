@@ -3,8 +3,8 @@
 The screen before the game starts shows the settings the game supports. A setting that only matters while another is on appears under it and disappears when that one is turned off. Tap **Play** to start; the app remembers your choices for the next start. All settings are on one scrollable screen, under **Game**, **Controls** and **Performance**. Tap a menu or move a slider there; no settings page needs opening. **Upscaling** is in **Game**, beside **Console mode**. A Mac app shows the same settings in a [window of its own](#the-mac-settings-window).
 
 - [Tested defaults](#tested-defaults)
-- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
-- [Controls](#controls): [Touch feedback](#touch-feedback), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
+- [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Internal resolution](#internal-resolution), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter), [Network](#network)
+- [Controls](#controls): [Touch feedback](#touch-feedback), [Controls size](#controls-size), [Controls opacity](#controls-opacity), [A/B buttons](#ab-buttons), [Touch gamepad as its own player](#touch-gamepad-as-its-own-player), [Button mapping](#button-mapping), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
 - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
 - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
 - [In-game menu](#in-game-menu)
@@ -17,7 +17,7 @@ Each game comes with the settings it was tested with: its profile in this reposi
 
 When you change a setting and tap **Play**, the app keeps your choice, also when a later build of the app ships other defaults. A setting you leave at its default is not stored: it follows the defaults of the build you have, so a newer build's tested settings reach you without doing anything. **Reset to tested defaults** at the bottom sets every setting back to its default, and **Play** then forgets your choices, so the game's defaults apply again. For testing, a line in `Documents/env.txt` overrides any setting ([Settings in a file](#settings-in-a-file)).
 
-A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter and Touch feedback, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
+A Mac app carries the same list (`Contents/Resources/dm/launcher.json`), without the iPhone's own Frame-rate counter, Touch feedback and Touch gamepad as its own player, for a front end that starts the app with the chosen values ([Front ends](frontends.md)).
 
 ## Game
 
@@ -36,6 +36,10 @@ Off, the default, keeps the 3D picture at full size. On lets the game lower its 
 The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed there and the game's own dynamic resolution is off; 100 % keeps the game's own. Lower can be lighter on the GPU but is blurrier; the HUD and text keep their sharpness. Only games the app can scale offer it.
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
+
+### Internal resolution
+
+The same idea as Render scale for games that don't have it: from 50 to 100 %, the game's 3D is drawn at that share of its width and height. Lower means less GPU work and less heat, and a softer picture. 100 %, the default, draws everything as before. It works on the graphics side, so any NVN game can take it, but some effects may not follow the scale: if something looks wrong, set it back to 100 %. It has been tried on a Mac and not yet on an iPhone. A game that offers Render scale shows that instead.
 
 ### Console mode
 
@@ -93,11 +97,48 @@ Games whose profile supports it (Breath of the Wild, Animal Crossing: New Horizo
 
 Shows the frames per second at the top left.
 
+### Network
+
+How the game reaches other players. **Offline** is the default and keeps the game off the network. **LAN** and **Local wireless** play with devices on the same Wi-Fi network: LAN for games with a LAN mode, Local wireless for the Switch's local play between consoles.
+
+On an iPhone, **VPN play** appears below the settings while Network is LAN, Local wireless or Automatic. It lets you play with friends on other networks through a VPN app, with every player on the same Tailscale, ZeroTier or NetBird network. On Tailscale or NetBird, a player who joins only types the host's address from the VPN app (100.x.x.x) into **Host's VPN address**; that alone sends the game through the VPN. The host leaves the box empty and turns on **Play over a VPN**, and so does everyone on ZeroTier, whose network the game searches for the host. The switch is hidden while the box holds an address. Play stays greyed out while the box holds something that isn't an address. If the switch is on and no VPN is connected, the game gets no network rather than using Wi-Fi, and the log says why. `DM_NET_VPN=1` and `DM_NET_DISCOVERY_PEER` in `Documents/env.txt` do the same, and the section then shows them without letting you change them.
+
+**Nextendo (online)** is offered only by an app built with `--nextendo`, and is then the default. It plays online through Nextendo, a community service that stands in for Nintendo's servers. Sign in under **Online** below the settings first. Nextendo gives a game token only to an account with a confirmed e-mail and a linked Discord account. The app keeps the sign-in in its own storage, and signing out there forgets it.
+
+**Automatic** turns on LAN, Local wireless and, in an app built with `--nextendo`, Nextendo all at once, so you don't have to pick one: the game uses whichever its own menu asks for. Online play still needs the sign-in under **Online**, and **VPN play** works here too.
+
+Signing in is all a game needs to go online: the app already carries Nextendo's certificate, so there is nothing to copy onto the phone. The game takes your name, country and, when the account has one, your birthday from your Nextendo account. Under **Online**, **Birthday, if Nextendo has none** is used only when the account gives none.
+
+**Player name** appears below the settings while Network is anything but Offline. It is the name other players see, up to 10 characters. Leave it empty to use your Nextendo username, or Player when you are not signed in. `DM_NICK` in `Documents/env.txt` does the same, and the field then shows it without letting you change it.
+
 ## Controls
+
+**Microphone (Mac).** Apps that support microphone input have this switch off by default. Turn it on and press Play to grant macOS access. The first enabled launch can ask even if the settings window is hidden. Choose an input device while the switch is on. Microphone gain is under Advanced settings.
+
 
 ### Touch feedback
 
 A light tap from the phone when you press an on-screen button.
+
+### Controls size
+
+How large the left stick, the A, B, X and Y keys and the D-pad are, from 75 % to 135 % (100 % by default). The shoulder keys, − and + keep their size. The A, B, X and Y keys keep touch circles at least 44 points across at every size. The controls grow from the bottom corners, so a larger size covers more of the picture; at 135 % they still stop short of the top row.
+
+### Controls opacity
+
+How solid the on-screen controls are, from 30 % to 100 % (100 % by default), the menu button included. A lower value shows more of the picture through them; they take touches as before.
+
+### A/B buttons
+
+**Nintendo** keeps the Switch's face buttons: A on the right and B at the bottom. **Xbox / PlayStation** swaps A and B, so A (Cross) is at the bottom and B (Circle) on the right, where Xbox and PlayStation controllers print them. The choice applies to the on-screen gamepad and to connected controllers; X and Y stay where they are. **Nintendo** is the default.
+
+### Touch gamepad as its own player
+
+For two people on one phone. Off (the default), the on-screen gamepad plays as player 1 and hides while a controller is connected, and the first controller is player 1 too. On, the on-screen gamepad is player 1 on its own and stays on screen, and each connected controller is a player of its own from player 2 on. In a game that asks players to join (Super Mario 3D World), player 2 joins with the controller. Only on the iPhone.
+
+### Button mapping
+
+Under **Controller buttons**, pick what each button of a connected controller sends to the game: swap A and B, put ZR on R, or have a button send nothing. Only the buttons you change are kept, and **Reset buttons** puts them all back. The on-screen controls and the Mac keyboard keep their own buttons. The section is on the iPhone and iPad settings screen and in the Mac settings window. It is saved as `DM_PAD_MAP`, so a `DM_PAD_MAP` line in `env.txt` wins over it.
 
 ### Game rumble
 
@@ -213,7 +254,7 @@ flowchart LR
 
 ### Performance HUD
 
-Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play.
+Apple's performance overlay over the game: frame rate, frame and GPU times, memory. Useful to see what a setting changes; leave it off for play. On the iPhone and iPad the in-game menu (the gear) turns it on and off while the game runs.
 
 ### Reset to tested defaults
 
@@ -221,7 +262,7 @@ Sets every setting back to the game's tested default; **Play** then forgets your
 
 ## The Mac settings window
 
-A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter** and **Touch feedback** are only on the iPhone.
+A Mac app ([A Mac app](development.md#a-mac-app)) shows its settings in a window before the game starts. They are the same settings as on the iPhone, with the same defaults. The window shows the most used ones first: **Frame rate**, **Render scale**, **Console mode**, **Game language**, **Display mode** and **Game rumble**, when the game has them. **Render scale** shows the picture's size in pixels beside the percentage for the chosen **Console mode**, when the game's profile has it (Breath of the Wild: 1600 × 900 docked, 1280 × 720 handheld at 100 %). The others are under **Advanced settings**, in the usual sections, with **Reset to tested defaults**. The window remembers whether Advanced settings is open. **Frame-rate counter**, **Touch feedback** and **Touch gamepad as its own player** are only on the iPhone.
 
 Click **Play** (or press Return) to start the game. **Quit**, ⌘Q or closing the window ends the app without the game. The app remembers your choices for that game, and a game started without the window, from a front end or with the window turned off, uses them too ([Saved choices](frontends.md#saved-choices)). A setting fixed by an `env.txt` or by the program that started the app is shown greyed out.
 
@@ -251,13 +292,13 @@ iCloud Drive takes a moment to carry a file from one device to the other. Quit t
 
 ## In-game menu
 
-On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs; it stays when a controller hides the other controls. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D**, and **Tap**, no controls and every touch to the game, in handheld mode), **Touch feedback** and **Game rumble**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
+On the iPhone and iPad the gear at the top centre of the touch controls opens a menu while the game runs. With a physical controller connected on the device screen, the gear fades out after 3 idle seconds and returns for 3 seconds when you touch the screen. It holds **Console mode**, **Picture** and the **Frame-rate counter**, then **Controller layout** (**2D**, **3D** and **Tap**, no controls and every touch to the game, in handheld mode; then **Edit controls**), **Touch feedback**, **Controls size**, **Controls opacity** and **Game rumble**, then **Performance HUD**: the settings that take effect at once. A choice opens to show its options, the current one ticked. The menu's text keeps one size whatever the system text size, so it stays short over the game. A change is remembered as on the settings screen, which shows it at the next start; a setting `Documents/env.txt` fixes is shown, not changed. The other settings need the game to start again, so they are only on the settings screen: close the app fully and open it again.
 
 Console mode changes as on a Switch put in or taken out of its dock. While a TV shows the game it stays **Docked**, and the mode you pick applies when the TV is disconnected. **Docked** removes the Tap layout, as a docked Switch reads no touch screen.
 
 ## TV
 
-Connect a TV or monitor by cable, or start Screen Mirroring to an Apple TV or AirPlay TV. The game fills it in 16:9 at up to 1080p and switches to **Docked**; the iPhone or iPad keeps the controls. Disconnect to bring the game back to the device in its earlier mode. AirPlay adds some delay; a cable has almost none.
+Connect a TV or monitor by cable, or start Screen Mirroring to an Apple TV or AirPlay TV. The game fills it in 16:9 at up to 1080p and switches to **Docked**. The iPhone or iPad keeps its touch controls. With a physical controller connected, the touch controls and settings gear hide. Disconnect the controller to use touch again, or disconnect the TV to bring the picture and gear back to the device in its earlier mode. AirPlay adds some delay; a cable has almost none.
 
 ## Settings in a file
 
@@ -265,8 +306,9 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 
 | Setting | Variable | Values |
 |---|---|---|
-| Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (Mac, games with `fps_max 120`) |
+| Frame rate | `DM_FPS_TARGET` | `30`, `60`, `120` (games with `fps_max 120`) |
 | Render scale | `DM_RENDER_SCALE` | `0.5` to `1.0` (Hades II: to `3.0`) |
+| Internal resolution | `DM_RESCALE` | `0.5` to `1.0` (the variable takes up to `2.0`) |
 | Console mode | `DM_OPMODE` | `1` docked, `0` handheld |
 | Game language | `DM_LANG` | a language code, such as `ja` |
 | Display mode (Mac) | `DM_FULLSCREEN` | `1` fullscreen, `0` a window |
@@ -275,6 +317,10 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Picture shape | `DM_SCREEN_ASPECT` | `auto` the app window's own shape where it is taller than 16:9 (iPad 4:3, iPhone Duo 1.43:1), else 16:9 (iOS only); `1.43` the iPhone Duo's shape, `0` 16:9 |
 | Frame-rate counter | `DM_SHOW_FPS` | `1`, `0` |
 | Touch feedback | `DM_TOUCH_HAPTICS` | `1`, `0` |
+| Controls size (iPhone and iPad) | `DM_CONTROLS_SCALE` | `0.75` to `1.35` |
+| Controls opacity (iPhone and iPad) | `DM_CONTROLS_OPACITY` | `0.3` to `1` |
+| A/B buttons | `DM_PAD_AB` | `nintendo`, `xbox` |
+| Touch gamepad as its own player | `DM_TOUCH_PLAYER` | `own`, `shared` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
 | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
