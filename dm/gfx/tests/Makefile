@@ -28,7 +28,7 @@ FW=-framework Metal -framework MetalFX -framework Foundation -framework IOKit -f
 MTL_T_DEP=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(GFX_H)
 MTL_T_SRC=../nvn/hle_nvn.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(filter-out ../nvn/nvn_mtl.m,$(GFX))
 # CPU-only section walks, including every registration producer; ASan needs no prefix ignorelist.
-REGISTRATION_SRC=../gl/hle_gl.m ../../host/hle.c ../../host/hle_table.c ../../host/hle_sf.c ../nvn/nvn_mtl.m $(MTL_T_SRC)
+REGISTRATION_SRC=../gl/hle_gl.m ../../host/hle.c ../../host/hle_table.c ../../host/hle_sf.c ../../host/hle_net_diag.c ../nvn/nvn_mtl.m $(MTL_T_SRC)
 REGISTRATION_DEP=Makefile t_registration.m ../vk/hle_vk.m $(REGISTRATION_SRC) $(MTL_T_DEP)
 t_registration: $(REGISTRATION_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_registration.m $(REGISTRATION_SRC) $(FW)
