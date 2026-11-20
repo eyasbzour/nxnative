@@ -97,7 +97,7 @@ __attribute__((weak, visibility("hidden"))) void *dm_bigstack_caller(void *ra) {
     extern const char cname##_wait[];                                                             \
     __asm__(".text\n.p2align 2\n.globl _" #cname "_wait\n.private_extern _" #cname "_wait\n_" #cname "_wait:\n" \
             "    stp x16, x17, [sp, #-32]!\n    str x30, [sp, #16]\n    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_hle_wait_enter\n"); \
-    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)(uintptr_t)cname##_wait, why, NULL}; \
+    DM_REGISTER("swforce", hle_force_ent, hle_force_##cname, {mangled, (void *)(uintptr_t)cname##_wait, why, NULL}); \
     static ret cname(__VA_ARGS__)
 
 // Host service sessions (hle_sf.c): a request on a session the host serves, as its service sees it, and the answer it fills in. The input is the raw CMIF data after the "SFCI"
