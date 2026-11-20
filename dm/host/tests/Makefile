@@ -126,8 +126,8 @@ sync-wait: $(B)/t_sync_wait
 .PHONY: sync-wait
 run: $(B)/t_symbols
 run: $(B)/t_server_environment
-$(B)/t_server_environment: t_server_environment.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c
+$(B)/t_server_environment: t_server_environment.c t_net_off.c ../hle_offline.c ../hle_net.h ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_server_environment.c t_net_off.c
 .PHONY: server-environment
 server-environment: $(B)/t_server_environment
 	$(B)/t_server_environment
@@ -321,14 +321,14 @@ run: $(B)/t_pad_apple
 $(B)/t_pad_apple: t_pad_apple.m ../pad_apple.h ../dm_input.h | $(B)
 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -I.. -o $@ t_pad_apple.m -framework Foundation -framework GameController
 run: $(B)/t_account
-$(B)/t_account: t_account.c ../hle_account.c ../hle_account_users.c ../account_users.h ../front.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_account.c ../hle_account_users.c ../hle_bigstack.c
+$(B)/t_account: t_account.c t_nextendo_off.c ../hle_account.c ../hle_account_users.c ../account_users.h ../front.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function $(GINC) -o $@ t_account.c t_nextendo_off.c ../hle_account_users.c ../hle_bigstack.c
 run: account-saves
 .PHONY: account-saves
 account-saves: $(B)/t_account_save
 	$(B)/t_account_save
-$(B)/t_account_save: t_account_save.c t_fs_stub.c ../hle_account.c ../hle_account_users.c ../account_users.h ../hle_fs.c ../hle_bigstack.c ../save_sync.c ../hle.h ../front.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_account_save.c t_fs_stub.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
+$(B)/t_account_save: t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account.c ../hle_account_users.c ../account_users.h ../hle_fs.c ../hle_bigstack.c ../save_sync.c ../hle.h ../front.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_account_save.c t_fs_stub.c t_nextendo_off.c ../hle_account_users.c ../hle_bigstack.c ../save_sync.c
 run: $(B)/t_home_quit $(B)/t_home_quit_mac
 $(B)/t_home_quit: t_home_quit.c ../home_quit.h | $(B)
 	$(CLANG) -O1 -g -Wall -Werror -I.. -o $@ t_home_quit.c
@@ -364,8 +364,8 @@ $(B)/t_time: t_time.c ../hle_time.c ../hle_table.c ../hle.h ../dm.h $(GAME_H) | 
 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. $(GINC) -o $@ t_time.c ../hle_table.c
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
-$(B)/t_friends: t_friends.c ../hle_friends.c ../hle.h ../dm.h $(GAME_H) | $(B)
-	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_friends.c
+$(B)/t_friends: t_friends.c t_nextendo_off.c ../hle_friends.c ../hle.h ../dm.h $(GAME_H) | $(B)
+	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_friends.c t_nextendo_off.c
 $(B)/t_condvar: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
 	$(CLANG) -O1 -Wno-unused-function -DDM_TEST_HOOKS -I.. $(GINC) -o $@ t_condvar.c t_condvar_stub.c ../hle_thread.c
 $(B)/t_condvar_old: t_condvar.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
@@ -658,7 +658,7 @@ nsd-sanitize: $(B)/t_nsd_asan
 	$(B)/t_nsd_asan
 run: ssl nextendo-routes nextendo-x509 nsd
 
-ACCOUNT_SOURCES = t_nextendo_account.m ../hle_account.c ../hle_nextendo_apple.m ../hle_nextendo_api_apple.m ../hle_bigstack.c ../entry.S
+ACCOUNT_SOURCES = t_nextendo_account.m ../hle_account.c ../hle_account_users.c ../hle_nextendo_apple.m ../hle_nextendo_api_apple.m ../hle_bigstack.c ../entry.S
 ACCOUNT_DEPS = t_gate_fixture.h ../nextendo_login_apple.inc $(ACCOUNT_SOURCES) ../nextendo_account.h ../net_socket.h ../hle.h $(GAME_H)
 $(B)/t_nextendo_account: $(ACCOUNT_DEPS) | $(B)
 	$(CLANG) $(SSL_FLAGS) -o $@ $(ACCOUNT_SOURCES) -framework Foundation -framework Security
